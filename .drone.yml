@@ -10,9 +10,6 @@ steps:
 - name: build
   image: archlinux:base-devel
   privileged: true
-  environment:
-    NEXTCLOUD_KEY:
-      from_secret: nextcloud
   commands:
   - pacman --noconfirm -Syyu mtools dosfstools squashfs-tools e2fsprogs erofs-utils arch-install-scripts xorriso neofetch
   - neofetch
