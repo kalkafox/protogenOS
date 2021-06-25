@@ -1,0 +1,29 @@
+kind: pipeline
+type: docker
+name: protogenOS
+
+steps:
+- name: submodules
+  image: alpine/git
+  commands:
+  - git submodule update --init --recursive
+- name: build
+  image: archlinux:base-devel
+  privileged: true
+  environment:
+    NEXTCLOUD_KEY:
+      from_secret: nextcloud
+  commands:
+  - pacman --noconfirm -Syyu mtools dosfstools squashfs-tools e2fsprogs erofs-utils arch-install-scripts xorriso neofetch
+  - neofetch
+  - mkdir /tmp/archiso
+  - mkdir protogenOS
+  - archiso/archiso/mkarchiso -v -w /tmp/archiso -o protogenOS protogenos
+- name: publish
+  image: plugins/github-release
+  settings:
+    api_key:
+      from_secret: github_key
+    files: protogenOS/*
+  when:
+    event: tag
