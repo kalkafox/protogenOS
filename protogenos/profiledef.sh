@@ -2,11 +2,11 @@
 # shellcheck disable=SC2034
 
 iso_name="protogenOS"
-iso_label="PROTOGENOS_$(date +%Y%m)"
+iso_label="PTOS_$(date +%Y%m)"
 iso_publisher="protogenOS <https://protogenos.kalka.io>"
 iso_application="protogenOS Live/Rescue CD"
 iso_version="$(date +%Y.%m.%d)"
-install_dir="protogen"
+install_dir="ptos"
 buildmodes=('iso')
 bootmodes=('bios.syslinux.mbr' 'bios.syslinux.eltorito' 'uefi-x64.systemd-boot.esp' 'uefi-x64.systemd-boot.eltorito')
 arch="x86_64"
