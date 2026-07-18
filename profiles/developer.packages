@@ -1,0 +1,12 @@
+# Developer persona additions
+base-devel
+git
+tmux
+python
+nodejs
+npm
+podman
+podman-compose
+shellcheck
+gdb
+strace

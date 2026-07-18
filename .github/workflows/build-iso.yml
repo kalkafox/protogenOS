@@ -1,0 +1,59 @@
+name: Build protogenOS ISO
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protogenos-iso-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ISO
+    runs-on: [self-hosted, linux, x64, protogenos-build]
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Build Archiso container
+        run: |
+          docker buildx build --load \
+            --tag protogenos-archiso-builder \
+            --file docker/Dockerfile \
+            .
+
+      - name: Build ISO
+        run: |
+          docker run --rm --privileged \
+            --env "HOST_UID=$(id -u)" \
+            --env "HOST_GID=$(id -g)" \
+            --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/workspace" \
+            protogenos-archiso-builder \
+            /workspace/scripts/container-build
+
+      - name: Verify generated checksum
+        run: |
+          test -n "$(find out -maxdepth 1 -name '*.iso' -print -quit)"
+          cd out
+          sha256sum --check SHA256SUMS
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: protogenos-iso-${{ github.run_number }}
+          path: |
+            out/*.iso
+            out/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+image_name="${PROTOGENOS_BUILDER_IMAGE:-protogenos-archiso-builder}"
+arch_image="${PROTOGENOS_ARCH_IMAGE:-archlinux:base}"
+
+if ! command -v docker >/dev/null 2>&1; then
+    echo "Docker was not found." >&2
+    exit 1
+fi
+
+docker build \
+    --build-arg "ARCH_IMAGE=${arch_image}" \
+    --tag "${image_name}" \
+    --file "${project_root}/docker/Dockerfile" \
+    "${project_root}"
+
+docker run --rm --privileged \
+    --env "HOST_UID=$(id -u)" \
+    --env "HOST_GID=$(id -g)" \
+    --mount "type=bind,src=${project_root},dst=/workspace" \
+    "${image_name}" \
+    /workspace/scripts/container-build

@@ -1,0 +1,44 @@
+name: Build protogenOS kernels
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protogenos-kernels-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.flavor }} kernel
+    runs-on: [self-hosted, linux, x64, protogenos-build]
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        flavor: [generic, performance, developer, zen, minimal-vm]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Build kernel packages
+        run: ./scripts/build-kernel "${{ matrix.flavor }}"
+
+      - name: Verify package checksums
+        working-directory: kernels/out/${{ matrix.flavor }}
+        run: sha256sum --check SHA256SUMS
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: protogenos-kernel-${{ matrix.flavor }}-${{ github.run_number }}
+          path: kernels/out/${{ matrix.flavor }}/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

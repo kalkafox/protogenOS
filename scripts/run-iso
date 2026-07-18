@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/qemu-lib
+source "${project_root}/scripts/qemu-lib"
+
+usage() {
+    cat <<'EOF'
+Usage: ./scripts/run-iso [options]
+
+Boot the newest ISO in out/ under QEMU. UEFI is the default.
+
+  --iso PATH       Boot a specific ISO
+  --disk PATH      Attach an existing qcow2 installation disk
+  --bios           Use legacy BIOS instead of UEFI
+  --uefi           Use UEFI firmware (default)
+  --memory MiB     Guest memory (default: 4096)
+  --cpus COUNT     Virtual CPU count (default: 4)
+  --headless       Disable the graphical display
+  --dry-run        Print the QEMU command without executing it
+  -h, --help       Show this help
+EOF
+}
+
+iso_path=""
+disk_path=""
+firmware="uefi"
+memory="4096"
+cpus="4"
+headless=false
+dry_run=false
+
+while (($#)); do
+    case "$1" in
+        --iso) iso_path="${2:?--iso requires a path}"; shift 2 ;;
+        --disk) disk_path="${2:?--disk requires a path}"; shift 2 ;;
+        --bios) firmware="bios"; shift ;;
+        --uefi) firmware="uefi"; shift ;;
+        --memory) memory="${2:?--memory requires MiB}"; shift 2 ;;
+        --cpus) cpus="${2:?--cpus requires a count}"; shift 2 ;;
+        --headless) headless=true; shift ;;
+        --dry-run) dry_run=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+iso_path="$(qemu_find_iso "${iso_path}")"
+qemu_add_common_args "${iso_path}" "${memory}" "${cpus}" "${disk_path}" "${headless}"
+
+firmware_dir=""
+cleanup() {
+    if [[ -n "${firmware_dir}" && "${firmware_dir}" == /tmp/protogenos-ovmf.* ]]; then
+        rm -rf -- "${firmware_dir}"
+    fi
+}
+trap cleanup EXIT
+
+if [[ "${firmware}" == uefi ]]; then
+    qemu_find_ovmf
+    firmware_dir="$(mktemp -d /tmp/protogenos-ovmf.XXXXXXXX)"
+    cp "${QEMU_OVMF_VARS}" "${firmware_dir}/OVMF_VARS.fd"
+    QEMU_ARGS+=(
+        -drive "if=pflash,format=raw,readonly=on,file=${QEMU_OVMF_CODE}"
+        -drive "if=pflash,format=raw,file=${firmware_dir}/OVMF_VARS.fd"
+    )
+fi
+
+echo "Booting ${iso_path} with ${firmware^^} firmware"
+qemu_execute "${dry_run}" "${QEMU_SYSTEM_X86_64:-qemu-system-x86_64}" "${QEMU_ARGS[@]}"

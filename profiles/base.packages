@@ -1,0 +1,11 @@
+# Shared system foundation; KDE is currently the first desktop target.
+base
+linux-firmware
+plasma-meta
+sddm
+networkmanager
+pipewire
+pipewire-pulse
+wireplumber
+xdg-desktop-portal-kde
+polkit-kde-agent

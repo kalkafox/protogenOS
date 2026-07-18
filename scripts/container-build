@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+build_root="$(mktemp -d /tmp/protogenos-build.XXXXXXXX)"
+
+cleanup() {
+    # mkarchiso normally removes its own work directory after a successful
+    # build. Only remove our exact temporary directory after checking it.
+    if [[ "${build_root}" == /tmp/protogenos-build.* ]]; then
+        rm -rf -- "${build_root}"
+    fi
+}
+trap cleanup EXIT
+
+export PROTOGENOS_PROFILE_DIR="${build_root}/profile"
+export PROTOGENOS_WORK_DIR="${build_root}/work"
+export PROTOGENOS_OUTPUT_DIR="${build_root}/out"
+
+"${project_root}/scripts/prepare-profile"
+"${project_root}/scripts/build-iso"
+
+mkdir -p "${project_root}/out"
+cp -f "${PROTOGENOS_OUTPUT_DIR}"/*.iso "${project_root}/out/"
+(
+    cd "${project_root}/out"
+    sha256sum ./*.iso > SHA256SUMS
+)
+
+# Bind-mounted outputs otherwise belong to root on the host. CI does not need
+# this, but it keeps local Docker builds convenient.
+if [[ -n "${HOST_UID:-}" && -n "${HOST_GID:-}" ]]; then
+    chown "${HOST_UID}:${HOST_GID}" \
+        "${project_root}/out" \
+        "${project_root}/out"/*.iso \
+        "${project_root}/out/SHA256SUMS"
+fi
+
+echo "ISO artifacts and checksums copied to ${project_root}/out"

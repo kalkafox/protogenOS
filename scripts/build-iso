@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+profile="${PROTOGENOS_PROFILE_DIR:-${project_root}/profile}"
+work_dir="${PROTOGENOS_WORK_DIR:-${project_root}/work}"
+output_dir="${PROTOGENOS_OUTPUT_DIR:-${project_root}/out}"
+
+if ! command -v mkarchiso >/dev/null 2>&1; then
+    echo "mkarchiso was not found. Install it with: sudo pacman -S archiso" >&2
+    exit 1
+fi
+
+if [[ ! -d "${profile}" ]]; then
+    echo "No generated profile found. Run ./scripts/prepare-profile first." >&2
+    exit 1
+fi
+
+if (( EUID != 0 )); then
+    echo "Archiso must build as root. Run: sudo ./scripts/build-iso" >&2
+    exit 1
+fi
+
+mkdir -p "${output_dir}"
+
+mkarchiso -v -r \
+    -w "${work_dir}" \
+    -o "${output_dir}" \
+    "${profile}"

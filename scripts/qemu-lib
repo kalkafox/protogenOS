@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+
+qemu_project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+qemu_find_iso() {
+    local requested="${1:-}"
+    if [[ -n "${requested}" ]]; then
+        [[ -f "${requested}" ]] || {
+            echo "ISO not found: ${requested}" >&2
+            return 1
+        }
+        readlink -f -- "${requested}"
+        return
+    fi
+
+    local candidate latest=""
+    shopt -s nullglob
+    for candidate in "${qemu_project_root}"/out/*.iso; do
+        if [[ -z "${latest}" || "${candidate}" -nt "${latest}" ]]; then
+            latest="${candidate}"
+        fi
+    done
+    shopt -u nullglob
+    [[ -n "${latest}" ]] || {
+        echo "No ISO found in ${qemu_project_root}/out; run ./scripts/docker-build first." >&2
+        return 1
+    }
+    readlink -f -- "${latest}"
+}
+
+qemu_add_common_args() {
+    local iso="$1" memory="$2" cpus="$3" disk="$4" headless="$5"
+    QEMU_ARGS=(
+        -machine q35
+        -m "${memory}"
+        -smp "${cpus}"
+        -boot menu=on
+        -nic user,model=virtio-net-pci
+        -drive "file=${iso},media=cdrom,readonly=on,format=raw"
+    )
+    if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+        QEMU_ARGS+=(-enable-kvm -cpu host)
+    else
+        QEMU_ARGS+=(-accel tcg -cpu max)
+    fi
+    if [[ -n "${disk}" ]]; then
+        [[ -f "${disk}" ]] || {
+            echo "VM disk not found: ${disk}" >&2
+            return 1
+        }
+        QEMU_ARGS+=(-drive "file=$(readlink -f -- "${disk}"),if=virtio,format=qcow2")
+    fi
+    if [[ "${headless}" == true ]]; then
+        QEMU_ARGS+=(-display none -serial mon:stdio)
+    fi
+}
+
+qemu_find_ovmf() {
+    local code_candidate vars_candidate
+    local -a code_candidates=(
+        "${PROTOGENOS_OVMF_CODE:-}"
+        /usr/share/edk2/x64/OVMF_CODE.4m.fd
+        /usr/share/edk2-ovmf/x64/OVMF_CODE.fd
+        /usr/share/OVMF/OVMF_CODE.fd
+    )
+    local -a vars_candidates=(
+        "${PROTOGENOS_OVMF_VARS:-}"
+        /usr/share/edk2/x64/OVMF_VARS.4m.fd
+        /usr/share/edk2-ovmf/x64/OVMF_VARS.fd
+        /usr/share/OVMF/OVMF_VARS.fd
+    )
+    QEMU_OVMF_CODE=""
+    QEMU_OVMF_VARS=""
+    for code_candidate in "${code_candidates[@]}"; do
+        if [[ -n "${code_candidate}" && -f "${code_candidate}" ]]; then
+            QEMU_OVMF_CODE="${code_candidate}"
+            break
+        fi
+    done
+    for vars_candidate in "${vars_candidates[@]}"; do
+        if [[ -n "${vars_candidate}" && -f "${vars_candidate}" ]]; then
+            QEMU_OVMF_VARS="${vars_candidate}"
+            break
+        fi
+    done
+    [[ -n "${QEMU_OVMF_CODE}" && -n "${QEMU_OVMF_VARS}" ]] || {
+        echo "OVMF firmware not found; install edk2-ovmf or set PROTOGENOS_OVMF_CODE and PROTOGENOS_OVMF_VARS." >&2
+        return 1
+    }
+}
+
+qemu_print_command() {
+    printf '%q ' "$@"
+    printf '\n'
+}
+
+qemu_execute() {
+    local dry_run="$1"
+    shift
+    if [[ "${dry_run}" == true ]]; then
+        qemu_print_command "$@"
+        return
+    fi
+    command -v "$1" >/dev/null 2>&1 || {
+        echo "$1 was not found; install qemu-desktop." >&2
+        return 1
+    }
+    "$@"
+}

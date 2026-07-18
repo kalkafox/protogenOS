@@ -1,0 +1,10 @@
+.git
+.codegraph
+out
+profile
+work
+*.iso
+*.log
+*.pkg.tar.*
+kernels/out
+kernels/work

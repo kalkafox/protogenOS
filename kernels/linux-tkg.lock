@@ -1,0 +1,4 @@
+# Update the revision and version together after reviewing upstream changes.
+LINUX_TKG_REPOSITORY=https://github.com/Frogging-Family/linux-tkg.git
+LINUX_TKG_REVISION=c63e6beab7dc24732994d3b17a97b475e3413a83
+LINUX_VERSION=v7.1.3

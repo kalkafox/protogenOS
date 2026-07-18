@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source_profile="/usr/share/archiso/configs/releng"
+target_profile="${PROTOGENOS_PROFILE_DIR:-${project_root}/profile}"
+
+if [[ ! -d "${source_profile}" ]]; then
+    echo "Archiso's releng profile was not found." >&2
+    echo "Install it on Arch Linux with: sudo pacman -S archiso" >&2
+    exit 1
+fi
+
+if [[ -e "${target_profile}" ]]; then
+    echo "${target_profile} already exists; leaving it unchanged." >&2
+    echo "Move it aside if you want to prepare a fresh profile." >&2
+    exit 1
+fi
+
+cp -a "${source_profile}" "${target_profile}"
+cp -a "${project_root}/overlays/airootfs/." "${target_profile}/airootfs/"
+
+profile_definition="${target_profile}/profiledef.sh"
+sed -i \
+    -e 's/^iso_name=.*/iso_name="protogenos"/' \
+    -e 's/^iso_label=.*/iso_label="PROTO_$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y%m)"/' \
+    -e 's|^iso_publisher=.*|iso_publisher="protogenOS Project"|' \
+    -e 's|^iso_application=.*|iso_application="protogenOS Live/Installation Media"|' \
+    -e 's/^install_dir=.*/install_dir="protogenos"/' \
+    "${profile_definition}"
+
+echo "Prepared Archiso profile at ${target_profile}"

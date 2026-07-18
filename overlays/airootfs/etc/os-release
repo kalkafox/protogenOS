@@ -1,0 +1,7 @@
+NAME="protogenOS"
+PRETTY_NAME="protogenOS (Live Environment)"
+ID=protogenos
+ID_LIKE=arch
+BUILD_ID=rolling
+ANSI_COLOR="38;2;75;220;220"
+LOGO=protogenos

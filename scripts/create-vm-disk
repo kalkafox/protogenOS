@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+disk_path="${1:-${project_root}/out/protogenos-dev.qcow2}"
+disk_size="${2:-40G}"
+
+command -v qemu-img >/dev/null 2>&1 || {
+    echo "qemu-img was not found; install qemu-img or qemu-desktop." >&2
+    exit 1
+}
+if [[ -e "${disk_path}" ]]; then
+    echo "Refusing to overwrite existing disk: ${disk_path}" >&2
+    exit 1
+fi
+
+mkdir -p "$(dirname "${disk_path}")"
+qemu-img create -f qcow2 "${disk_path}" "${disk_size}"
+echo "Created ${disk_path}; attach it with ./scripts/run-iso --disk ${disk_path}"

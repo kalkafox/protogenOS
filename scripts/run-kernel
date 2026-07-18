@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/qemu-lib
+source "${project_root}/scripts/qemu-lib"
+
+usage() {
+    cat <<'EOF'
+Usage: ./scripts/run-kernel [options]
+
+Extract and directly boot the ISO's kernel/initramfs under QEMU. The ISO remains
+attached so Archiso can locate its live root filesystem.
+
+  --iso PATH       Use a specific ISO
+  --disk PATH      Attach an existing qcow2 installation disk
+  --memory MiB     Guest memory (default: 4096)
+  --cpus COUNT     Virtual CPU count (default: 4)
+  --append TEXT    Append extra kernel parameters
+  --headless       Add a serial console and disable graphics
+  --dry-run        Print the QEMU command without executing it
+  -h, --help       Show this help
+EOF
+}
+
+iso_path=""
+disk_path=""
+memory="4096"
+cpus="4"
+extra_options=""
+headless=false
+dry_run=false
+
+while (($#)); do
+    case "$1" in
+        --iso) iso_path="${2:?--iso requires a path}"; shift 2 ;;
+        --disk) disk_path="${2:?--disk requires a path}"; shift 2 ;;
+        --memory) memory="${2:?--memory requires MiB}"; shift 2 ;;
+        --cpus) cpus="${2:?--cpus requires a count}"; shift 2 ;;
+        --append) extra_options="${2:?--append requires text}"; shift 2 ;;
+        --headless) headless=true; shift ;;
+        --dry-run) dry_run=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+command -v bsdtar >/dev/null 2>&1 || {
+    echo "bsdtar was not found; install libarchive." >&2
+    exit 1
+}
+
+iso_path="$(qemu_find_iso "${iso_path}")"
+loader_entry=""
+while IFS= read -r candidate; do
+    if [[ "${candidate}" == loader/entries/*linux.conf ]]; then
+        loader_entry="${candidate}"
+        break
+    fi
+done < <(bsdtar -tf "${iso_path}" 'loader/entries/*')
+[[ -n "${loader_entry}" ]] || {
+    echo "No Linux systemd-boot entry found in ${iso_path}." >&2
+    exit 1
+}
+
+kernel_path=""
+initramfs_path=""
+kernel_options=""
+while read -r directive value; do
+    case "${directive}" in
+        linux) kernel_path="${value#/}" ;;
+        initrd) initramfs_path="${value#/}" ;;
+        options) kernel_options="${value}" ;;
+    esac
+done < <(bsdtar -xOf "${iso_path}" "${loader_entry}")
+[[ -n "${kernel_path}" && -n "${initramfs_path}" && -n "${kernel_options}" ]] || {
+    echo "Incomplete kernel, initramfs, or options in ${loader_entry}." >&2
+    exit 1
+}
+
+boot_dir="$(mktemp -d /tmp/protogenos-boot.XXXXXXXX)"
+cleanup() {
+    if [[ "${boot_dir}" == /tmp/protogenos-boot.* ]]; then
+        rm -rf -- "${boot_dir}"
+    fi
+}
+trap cleanup EXIT
+bsdtar -xOf "${iso_path}" "${kernel_path}" > "${boot_dir}/vmlinuz-linux"
+bsdtar -xOf "${iso_path}" "${initramfs_path}" > "${boot_dir}/initramfs-linux.img"
+
+if [[ -n "${extra_options}" ]]; then
+    kernel_options+=" ${extra_options}"
+fi
+if [[ "${headless}" == true ]]; then
+    kernel_options+=" console=ttyS0"
+fi
+
+qemu_add_common_args "${iso_path}" "${memory}" "${cpus}" "${disk_path}" "${headless}"
+QEMU_ARGS+=(
+    -kernel "${boot_dir}/vmlinuz-linux"
+    -initrd "${boot_dir}/initramfs-linux.img"
+    -append "${kernel_options}"
+)
+
+echo "Direct-booting ${kernel_path} with ${initramfs_path}"
+qemu_execute "${dry_run}" "${QEMU_SYSTEM_X86_64:-qemu-system-x86_64}" "${QEMU_ARGS[@]}"
