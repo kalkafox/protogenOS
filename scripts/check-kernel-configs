@@ -21,7 +21,7 @@ declare -A package_names=()
 count=0
 for config in "${flavors_dir}"/*.cfg; do
     unset _version _custom_pkgbase _cpusched _compiler _processor_opt
-    unset _kernel_on_diet _nofallback
+    unset _kernel_on_diet _nofallback _tickless _acs_override
     source "${config}"
 
     flavor="$(basename "${config}" .cfg)"
@@ -53,6 +53,14 @@ for config in "${flavors_dir}"/*.cfg; do
     fi
     if [[ "${_nofallback:-}" != "true" ]]; then
         echo "${flavor}: linux-tkg must fail instead of prompting" >&2
+        exit 1
+    fi
+    if [[ "${_tickless:-}" != "2" ]]; then
+        echo "${flavor}: tickless-idle mode must be pinned" >&2
+        exit 1
+    fi
+    if [[ "${_acs_override:-}" != "false" ]]; then
+        echo "${flavor}: ACS override must be explicitly disabled" >&2
         exit 1
     fi
     if [[ "${flavor}" == "minimal-vm" ]]; then
