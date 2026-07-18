@@ -16,7 +16,7 @@ concurrency:
 jobs:
   build:
     name: Build ISO
-    runs-on: [self-hosted, linux, x64, protogenos-build]
+    runs-on: ubuntu-latest
     timeout-minutes: 90
 
     steps:

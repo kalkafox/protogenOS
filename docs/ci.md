@@ -1,8 +1,8 @@
-# Self-hosted GitHub Actions runner
+# Self-hosted kernel runner
 
-The ISO and kernel workflows run only on an x86-64 Linux runner carrying the
-custom label `protogenos-build`. One runner can service both workflows; GitHub
-executes one job at a time on a single runner registration.
+The kernel workflow runs on an x86-64 Linux runner carrying the custom label
+`protogenos-build`. Its five build jobs run serially. The ISO workflow uses
+GitHub's standard `ubuntu-latest` runner and does not use this machine.
 
 ## Host requirements
 
@@ -35,11 +35,11 @@ docker buildx version
 
 ## Security and maintenance
 
-Do not enable these workflows for pull requests from forks. A workflow running
-on a self-hosted machine can access its Docker daemon and host resources. The
-current workflows run only through maintainer dispatches and release-tag
-pushes. Keep the runner application, host packages, and Docker updated, monitor
-free disk space, and periodically prune unused project builder images.
+Do not enable the kernel workflow for pull requests from forks. A workflow
+running on a self-hosted machine can access its Docker daemon and host
+resources. The kernel workflow runs only through maintainer dispatches. Keep
+the runner application, host packages, and Docker updated, monitor free disk
+space, and periodically prune unused project builder images.
 
 GitHub currently does not charge execution minutes for self-hosted runners, but
 uploaded artifacts can consume billable Actions storage. Both workflows retain

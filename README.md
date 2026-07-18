@@ -69,12 +69,12 @@ rolling Arch image.
 
 ### GitHub Actions
 
-`.github/workflows/build-iso.yml` builds through the same container on the
-project's self-hosted runner when run manually or when a `v*` tag is pushed. It
+`.github/workflows/build-iso.yml` builds through the same container on GitHub's
+standard Ubuntu runner when run manually or when a `v*` tag is pushed. It
 uploads the ISO and `SHA256SUMS` as a GitHub Actions artifact retained for 14
 days. Normal branch pushes do not start the comparatively expensive ISO build.
-Both ISO and kernel workflows require the `protogenos-build` runner label; see
-`docs/ci.md` before registering the build machine.
+The kernel workflow remains self-hosted because its disk and CPU requirements
+are much larger; see `docs/ci.md` before registering that build machine.
 
 ## Installer prototype
 
