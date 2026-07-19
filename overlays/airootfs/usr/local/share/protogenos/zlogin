@@ -1,0 +1,9 @@
+# Launch once on the primary live console; exiting returns to this login shell.
+if [[ -o interactive && -t 0 \
+    && "$(tty 2>/dev/null)" == /dev/tty1 \
+    && -z "${PROTOGENOS_INSTALLER_STARTED:-}" ]]; then
+    export PROTOGENOS_INSTALLER_STARTED=1
+    protogenos-install
+    print
+    print "protogenOS installer closed. Run 'protogenos-install' to reopen it."
+fi

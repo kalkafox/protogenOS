@@ -120,7 +120,9 @@ class ProfileRepository:
                 tuple(choice.identifier for choice in group.choices if choice.default),
             )
             identifiers = _unique(identifiers)
-            if group.selection in {"one-of", "optional"} and len(identifiers) > 1:
+            if group.selection == "one-of" and len(identifiers) != 1:
+                raise ProfileError(f"option group {name!r} requires exactly one choice")
+            if group.selection == "optional" and len(identifiers) > 1:
                 raise ProfileError(f"option group {name!r} accepts at most one choice")
             choices_by_id = {choice.identifier: choice for choice in group.choices}
             invalid = set(identifiers) - set(choices_by_id)

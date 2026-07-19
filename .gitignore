@@ -2,11 +2,11 @@
 /profile/
 /work/
 *.iso
+*.qcow2
 *.log
 *.pkg.tar.*
 __pycache__/
 *.py[cod]
 .venv/
 *.egg-info/
-/kernels/out/
-/kernels/work/
+.codegraph/

@@ -12,7 +12,7 @@ base + general + developer + selected applications
 
 ## Selection rules
 
-- A `one-of` group presents alternatives and installs at most one choice.
+- A `one-of` group presents alternatives and requires exactly one choice.
 - An `any-of` group allows multiple choices.
 - An `optional` group can be skipped.
 - Every choice has a package source. `official` packages come from Arch's
@@ -27,6 +27,15 @@ a package that needs it.
 
 Browsers are an `any-of` group: Firefox is selected by default, but users may
 install several browsers or none at all.
+
+Terminal emulators and file managers are also `any-of` groups so users can
+install several. Konsole and Dolphin are the defaults since they integrate
+natively with the Plasma desktop; Kitty, Alacritty, Foot, WezTerm, Thunar,
+Nautilus, and PCManFM are opt-in alternatives.
+
+Kernels are a `one-of` group. The standard Arch `linux` package is the default,
+and the official `linux-zen` package is available for users who prefer its
+desktop-oriented tuning. protogenOS does not compile or distribute a kernel.
 
 The package names here are inputs to the future installer. They should be
 validated against the current repositories during each build rather than being

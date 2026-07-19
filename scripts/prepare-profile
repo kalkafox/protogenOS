@@ -19,6 +19,44 @@ fi
 
 cp -a "${source_profile}" "${target_profile}"
 cp -a "${project_root}/overlays/airootfs/." "${target_profile}/airootfs/"
+printf '\nsource /usr/local/share/protogenos/zlogin\n' \
+    >> "${target_profile}/airootfs/root/.zlogin"
+
+# Ship the installer in a stable location so the live-session command works.
+install -d \
+    "${target_profile}/airootfs/opt/protogenos/installer" \
+    "${target_profile}/airootfs/opt/protogenos/profiles" \
+    "${target_profile}/airootfs/opt/protogenos/scripts" \
+    "${target_profile}/airootfs/usr/local/bin"
+cp -a "${project_root}/installer/." \
+    "${target_profile}/airootfs/opt/protogenos/installer/"
+cp -a "${project_root}/profiles/." \
+    "${target_profile}/airootfs/opt/protogenos/profiles/"
+install -m 0755 "${project_root}/scripts/protogenos-install" \
+    "${target_profile}/airootfs/opt/protogenos/scripts/protogenos-install"
+ln -s /opt/protogenos/scripts/protogenos-install \
+    "${target_profile}/airootfs/usr/local/bin/protogenos-install"
+
+# Keep the installer's live-environment dependencies explicit instead of
+# depending on the current contents of Archiso's releng package list.
+for package in python arch-install-scripts dosfstools e2fsprogs parted; do
+    if ! grep -qxF "${package}" "${target_profile}/packages.x86_64"; then
+        printf '%s\n' "${package}" >> "${target_profile}/packages.x86_64"
+    fi
+done
+
+# Keep upstream boot mechanics while making every visible entry clearly ours.
+while IFS= read -r -d '' boot_config; do
+    sed -i \
+        -e 's/Arch Linux install medium/protogenOS Live Environment/g' \
+        -e 's/Arch Linux Installation Medium/protogenOS Live Environment/g' \
+        -e 's/Arch Linux/protogenOS/g' \
+        "${boot_config}"
+done < <(find \
+    "${target_profile}/efiboot" \
+    "${target_profile}/grub" \
+    "${target_profile}/syslinux" \
+    -type f -print0 2>/dev/null)
 
 profile_definition="${target_profile}/profiledef.sh"
 sed -i \
@@ -27,6 +65,7 @@ sed -i \
     -e 's|^iso_publisher=.*|iso_publisher="protogenOS Project"|' \
     -e 's|^iso_application=.*|iso_application="protogenOS Live/Installation Media"|' \
     -e 's/^install_dir=.*/install_dir="protogenos"/' \
+    -e '/^file_permissions=(/a\  ["/opt/protogenos/scripts/protogenos-install"]="0:0:755"' \
     "${profile_definition}"
 
 echo "Prepared Archiso profile at ${target_profile}"

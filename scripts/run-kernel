@@ -14,6 +14,8 @@ attached so Archiso can locate its live root filesystem.
 
   --iso PATH       Use a specific ISO
   --disk PATH      Attach an existing qcow2 installation disk
+  --bios           Boot with legacy BIOS (default: no firmware drives)
+  --uefi           Boot through OVMF/UEFI firmware
   --memory MiB     Guest memory (default: 4096)
   --cpus COUNT     Virtual CPU count (default: 4)
   --append TEXT    Append extra kernel parameters
@@ -25,6 +27,7 @@ EOF
 
 iso_path=""
 disk_path=""
+firmware="bios"
 memory="4096"
 cpus="4"
 extra_options=""
@@ -35,6 +38,8 @@ while (($#)); do
     case "$1" in
         --iso) iso_path="${2:?--iso requires a path}"; shift 2 ;;
         --disk) disk_path="${2:?--disk requires a path}"; shift 2 ;;
+        --bios) firmware="bios"; shift ;;
+        --uefi) firmware="uefi"; shift ;;
         --memory) memory="${2:?--memory requires MiB}"; shift 2 ;;
         --cpus) cpus="${2:?--cpus requires a count}"; shift 2 ;;
         --append) extra_options="${2:?--append requires text}"; shift 2 ;;
@@ -102,5 +107,23 @@ QEMU_ARGS+=(
     -append "${kernel_options}"
 )
 
-echo "Direct-booting ${kernel_path} with ${initramfs_path}"
+firmware_dir=""
+firmware_cleanup() {
+    if [[ -n "${firmware_dir}" && "${firmware_dir}" == /tmp/protogenos-ovmf.* ]]; then
+        rm -rf -- "${firmware_dir}"
+    fi
+}
+trap 'cleanup; firmware_cleanup' EXIT
+
+if [[ "${firmware}" == uefi ]]; then
+    qemu_find_ovmf
+    firmware_dir="$(mktemp -d /tmp/protogenos-ovmf.XXXXXXXX)"
+    cp "${QEMU_OVMF_VARS}" "${firmware_dir}/OVMF_VARS.fd"
+    QEMU_ARGS+=(
+        -drive "if=pflash,format=raw,readonly=on,file=${QEMU_OVMF_CODE}"
+        -drive "if=pflash,format=raw,file=${firmware_dir}/OVMF_VARS.fd"
+    )
+fi
+
+echo "Direct-booting ${kernel_path} with ${initramfs_path} (${firmware^^} firmware)"
 qemu_execute "${dry_run}" "${QEMU_SYSTEM_X86_64:-qemu-system-x86_64}" "${QEMU_ARGS[@]}"

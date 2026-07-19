@@ -21,6 +21,8 @@ export PROTOGENOS_OUTPUT_DIR="${build_root}/out"
 "${project_root}/scripts/build-iso"
 
 mkdir -p "${project_root}/out"
+find "${project_root}/out" -maxdepth 1 -type f \
+    \( -name '*.iso' -o -name 'SHA256SUMS' \) -delete
 cp -f "${PROTOGENOS_OUTPUT_DIR}"/*.iso "${project_root}/out/"
 (
     cd "${project_root}/out"

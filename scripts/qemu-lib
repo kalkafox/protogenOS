@@ -36,8 +36,10 @@ qemu_add_common_args() {
         -smp "${cpus}"
         -boot menu=on
         -nic user,model=virtio-net-pci
-        -drive "file=${iso},media=cdrom,readonly=on,format=raw"
     )
+    if [[ -n "${iso}" ]]; then
+        QEMU_ARGS+=(-drive "file=${iso},media=cdrom,readonly=on,format=raw")
+    fi
     if [[ -r /dev/kvm && -w /dev/kvm ]]; then
         QEMU_ARGS+=(-enable-kvm -cpu host)
     else

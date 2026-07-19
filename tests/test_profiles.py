@@ -1,7 +1,10 @@
+from io import StringIO
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from protogenos_installer import ProfileError, ProfileRepository
+from protogenos_installer.cli import main
 
 
 PROFILES = Path(__file__).resolve().parents[1] / "profiles"
@@ -13,7 +16,7 @@ class ProfileRepositoryTests(unittest.TestCase):
 
     def test_general_defaults_to_firefox(self) -> None:
         plan = self.repository.resolve("general")
-        self.assertEqual(plan.selections["kernel"], ("arch",))
+        self.assertEqual(plan.selections["kernel"], ("linux",))
         self.assertIn("linux", plan.packages)
         self.assertEqual(plan.selections["browser"], ("firefox",))
         self.assertIn("firefox", plan.packages)
@@ -55,9 +58,40 @@ class ProfileRepositoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ProfileError, "not installable yet"):
             self.repository.resolve("developer", {"dotfiles": ("dotconfig",)})
 
-    def test_unpublished_custom_kernel_is_not_installable(self) -> None:
-        with self.assertRaisesRegex(ProfileError, "not installable yet"):
-            self.repository.resolve("gamer", {"kernel": ("performance",)})
+    def test_linux_zen_is_an_official_kernel_choice(self) -> None:
+        plan = self.repository.resolve("gamer", {"kernel": ("linux-zen",)})
+        self.assertEqual(plan.selections["kernel"], ("linux-zen",))
+        self.assertIn("linux-zen", plan.packages)
+        self.assertNotIn("linux", plan.packages)
+        self.assertEqual(plan.aur_packages, ())
+
+    def test_kernel_choice_cannot_be_empty(self) -> None:
+        with self.assertRaisesRegex(ProfileError, "requires exactly one choice"):
+            self.repository.resolve("general", {"kernel": ()})
+
+    def test_installer_output_has_branded_title(self) -> None:
+        output = StringIO()
+        with patch("sys.stdout", output):
+            result = main(["--persona", "general", "--non-interactive"])
+        self.assertEqual(result, 0)
+        self.assertIn("=== protogenOS Installer ===", output.getvalue())
+
+    def test_interactive_installer_can_exit_to_shell(self) -> None:
+        output = StringIO()
+        with patch("sys.stdout", output), patch("builtins.input", return_value="0"):
+            result = main([])
+        self.assertEqual(result, 0)
+        self.assertIn("0. Exit to shell", output.getvalue())
+        self.assertIn("Installer closed", output.getvalue())
+
+    def test_keyboard_interrupt_exits_without_traceback(self) -> None:
+        output = StringIO()
+        with patch("builtins.input", side_effect=KeyboardInterrupt), patch(
+            "sys.stdout", output
+        ):
+            result = main([])
+        self.assertEqual(result, 130)
+        self.assertIn("Installation interrupted", output.getvalue())
 
 
 if __name__ == "__main__":

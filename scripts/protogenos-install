@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+script_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
+project_root="$(cd "$(dirname "${script_path}")/.." && pwd)"
 export PYTHONPATH="${project_root}/installer${PYTHONPATH:+:${PYTHONPATH}}"
 exec python -m protogenos_installer "$@"
