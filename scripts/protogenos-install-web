@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
+project_root="$(cd "$(dirname "${script_path}")/.." && pwd)"
+log_file="${PROTOGENOS_WEB_LOG:-/tmp/protogenos-install-web.log}"
+
+fail() {
+    echo "protogenos-install-web: $*" >&2
+    echo "protogenos-install-web: see ${log_file} for details" >&2
+    exit 1
+}
+
+# Common VM display drivers (virtio-gpu/QEMU, QXL/spice, plain Bochs VGA
+# under QEMU/KVM, VMware, VirtualBox) all have in-kernel KMS drivers, but
+# archiso's generic udev/kmod autoprobe doesn't always load them this early.
+# Best-effort load them before checking for a DRM device; failures here are
+# expected on hardware/hypervisors that don't need or ship these modules.
+for module in virtio_gpu bochs qxl vmwgfx vboxvideo; do
+    modprobe "${module}" >/dev/null 2>&1 || true
+done
+udevadm settle --timeout=5 >/dev/null 2>&1 || true
+
+# Bail out immediately (before starting anything) on machines with no GPU/DRM
+# device at all — bare hardware or a hypervisor with no display device
+# (e.g. QEMU -nographic/-vga none, or a headless VM) — so the caller can
+# fall straight back to the TUI instead of waiting on a compositor that can
+# never start.
+if ! compgen -G "/dev/dri/card*" >/dev/null 2>&1; then
+    echo "protogenos-install-web: no /dev/dri/card* device found; GUI unsupported here" >&2
+    exit 1
+fi
+
+for command in cage firefox curl python; do
+    if ! command -v "${command}" >/dev/null 2>&1; then
+        fail "required command not found: ${command}"
+    fi
+done
+
+dist_dir="${project_root}/installer-web/dist"
+[[ -f "${dist_dir}/index.html" ]] || fail "web GUI assets missing: ${dist_dir}"
+
+export PYTHONPATH="${project_root}/installer${PYTHONPATH:+:${PYTHONPATH}}"
+port="${PROTOGENOS_WEB_PORT:-8765}"
+url="http://127.0.0.1:${port}/"
+
+: > "${log_file}"
+echo "Starting protogenOS graphical installer (log: ${log_file})..."
+
+state_dir="$(mktemp -d /tmp/protogenos-web-state.XXXXXXXX)"
+keyboard_state="${state_dir}/keyboard"
+
+python -m protogenos_installer.webapi --dist "${dist_dir}" --port "${port}" \
+    --keyboard-state "${keyboard_state}" >> "${log_file}" 2>&1 &
+api_pid=$!
+browser_profile=""
+cleanup() {
+    kill "${api_pid}" 2>/dev/null || true
+    wait "${api_pid}" 2>/dev/null || true
+    remove_browser_profile
+    if [[ "${state_dir}" == /tmp/protogenos-web-state.* ]]; then
+        rm -rf -- "${state_dir}"
+    fi
+}
+trap cleanup EXIT
+
+# Python startup can take several seconds on slow media or TCG-emulated VMs.
+api_ready=false
+for _ in $(seq 1 300); do
+    if ! kill -0 "${api_pid}" 2>/dev/null; then
+        fail "installer API exited during startup"
+    fi
+    if curl -sf "${url}api/personas" >/dev/null 2>&1; then
+        api_ready=true
+        break
+    fi
+    sleep 0.1
+done
+[[ "${api_ready}" == true ]] || fail "installer API did not become ready on port ${port}"
+
+remove_browser_profile() {
+    if [[ "${browser_profile}" == /tmp/protogenos-firefox.* ]]; then
+        rm -rf -- "${browser_profile}"
+    fi
+}
+
+# A throwaway profile keeps Firefox's first-run, privacy-notice, default
+# browser, and crash-restore pages from replacing the installer in kiosk mode.
+# Each compositor restart gets a fresh one, so there's never a previous
+# session for Firefox to offer to restore.
+new_browser_profile() {
+    remove_browser_profile
+    browser_profile="$(mktemp -d /tmp/protogenos-firefox.XXXXXXXX)"
+    cat > "${browser_profile}/user.js" <<'EOF'
+user_pref("app.update.auto", false);
+user_pref("app.update.enabled", false);
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.startup.firstrunSkipsHomepage", true);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("browser.tabs.warnOnClose", false);
+user_pref("browser.translations.automaticallyPopup", false);
+user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("datareporting.policy.firstRunURL", "");
+user_pref("extensions.pocket.enabled", false);
+user_pref("startup.homepage_welcome_url", "");
+user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
+EOF
+}
+
+# The live environment runs seatd.service, so cage's libseat picks it (or
+# logind) directly; seatd-launch would collide with the service's socket.
+# llvmpipe keeps the GLES renderer usable on VM display devices without 3D.
+export WLR_RENDERER_ALLOW_SOFTWARE=1
+export MOZ_ENABLE_WAYLAND=1
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+install -d -m 0700 "${XDG_RUNTIME_DIR}"
+
+# -s keeps Ctrl+Alt+F<n> VT switching available so a shell stays reachable.
+# The compositor reads its keyboard layout only at startup, so the installer
+# API asks for a restart (via the flag file) after the user picks a layout.
+while true; do
+    if [[ -f "${keyboard_state}" ]]; then
+        { read -r XKB_DEFAULT_LAYOUT; read -r XKB_DEFAULT_VARIANT || true; } < "${keyboard_state}"
+        export XKB_DEFAULT_LAYOUT XKB_DEFAULT_VARIANT
+    fi
+    new_browser_profile
+    status=0
+    cage -s -- firefox --kiosk --no-remote --profile "${browser_profile}" "${url}" \
+        >> "${log_file}" 2>&1 || status=$?
+    if [[ -f "${state_dir}/restart" ]]; then
+        rm -f -- "${state_dir}/restart"
+        continue
+    fi
+    break
+done
+if (( status != 0 )); then
+    fail "graphical session exited with status ${status}"
+fi

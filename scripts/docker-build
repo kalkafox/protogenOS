@@ -10,11 +10,15 @@ if ! command -v docker >/dev/null 2>&1; then
     exit 1
 fi
 
-docker build \
-    --build-arg "ARCH_IMAGE=${arch_image}" \
-    --tag "${image_name}" \
-    --file "${project_root}/docker/Dockerfile" \
-    "${project_root}"
+if [[ -n "$(docker images -q "${image_name}" 2>/dev/null)" && "${PROTOGENOS_FORCE_BUILD:-}" != "1" ]]; then
+    echo "Image ${image_name} already exists; skipping build (set PROTOGENOS_FORCE_BUILD=1 to rebuild)."
+else
+    docker build \
+        --build-arg "ARCH_IMAGE=${arch_image}" \
+        --tag "${image_name}" \
+        --file "${project_root}/docker/Dockerfile" \
+        "${project_root}"
+fi
 
 docker run --rm --privileged \
     --env "HOST_UID=$(id -u)" \

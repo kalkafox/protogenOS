@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if ! command -v bun >/dev/null 2>&1; then
+    echo "bun was not found. Install it from https://bun.sh, or set" >&2
+    echo "PROTOGENOS_SKIP_FRONTEND_BUILD=1 to build without the web GUI." >&2
+    exit 1
+fi
+
+cd "${project_root}/installer-web"
+bun install --frozen-lockfile
+bun run build

@@ -3,7 +3,12 @@ if [[ -o interactive && -t 0 \
     && "$(tty 2>/dev/null)" == /dev/tty1 \
     && -z "${PROTOGENOS_INSTALLER_STARTED:-}" ]]; then
     export PROTOGENOS_INSTALLER_STARTED=1
-    protogenos-install
+    if grep -qw 'protogenos.installer=tui' /proc/cmdline 2>/dev/null; then
+        protogenos-install
+    else
+        protogenos-install-web || protogenos-install
+    fi
     print
-    print "protogenOS installer closed. Run 'protogenos-install' to reopen it."
+    print "protogenOS installer closed. Run 'protogenos-install' (text) or"
+    print "'protogenos-install-web' (graphical) to reopen it."
 fi

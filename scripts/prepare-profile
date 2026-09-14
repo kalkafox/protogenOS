@@ -36,14 +36,43 @@ install -m 0755 "${project_root}/scripts/protogenos-install" \
     "${target_profile}/airootfs/opt/protogenos/scripts/protogenos-install"
 ln -s /opt/protogenos/scripts/protogenos-install \
     "${target_profile}/airootfs/usr/local/bin/protogenos-install"
+install -m 0755 "${project_root}/scripts/protogenos-install-web" \
+    "${target_profile}/airootfs/opt/protogenos/scripts/protogenos-install-web"
+ln -s /opt/protogenos/scripts/protogenos-install-web \
+    "${target_profile}/airootfs/usr/local/bin/protogenos-install-web"
+
+# Build and ship the web GUI's static assets, unless explicitly skipped for
+# local CLI/TUI-only iteration on a machine without bun installed.
+if [[ "${PROTOGENOS_SKIP_FRONTEND_BUILD:-}" != "1" ]]; then
+    "${project_root}/scripts/build-frontend"
+    install -d "${target_profile}/airootfs/opt/protogenos/installer-web/dist"
+    cp -a "${project_root}/installer-web/dist/." \
+        "${target_profile}/airootfs/opt/protogenos/installer-web/dist/"
+else
+    echo "PROTOGENOS_SKIP_FRONTEND_BUILD=1: skipping web GUI build; the GUI" >&2
+    echo "installer will be unavailable on this profile (TUI still works)." >&2
+fi
 
 # Keep the installer's live-environment dependencies explicit instead of
 # depending on the current contents of Archiso's releng package list.
-for package in python arch-install-scripts dosfstools e2fsprogs parted; do
+# cage/firefox/seatd/mesa/curl back the web GUI installer; mesa provides the
+# llvmpipe software rasterizer so it still renders under VM display devices
+# (virtio-gpu, QXL, VMware, VirtualBox) with no 3D acceleration exposed. It
+# falls back to the TUI below (via protogenos-install-web's own checks, and
+# zlogin's boot-cmdline override) on machines with no DRM device at all.
+for package in python arch-install-scripts dosfstools e2fsprogs parted \
+    cage firefox seatd mesa curl; do
     if ! grep -qxF "${package}" "${target_profile}/packages.x86_64"; then
         printf '%s\n' "${package}" >> "${target_profile}/packages.x86_64"
     fi
 done
+
+# cage gets DRM/input access through this seatd instance (or logind). Don't
+# wrap cage in seatd-launch: it refuses to start while this service owns
+# /run/seatd.sock, which silently dropped every boot back to the TUI.
+install -d "${target_profile}/airootfs/etc/systemd/system/multi-user.target.wants"
+ln -sf /usr/lib/systemd/system/seatd.service \
+    "${target_profile}/airootfs/etc/systemd/system/multi-user.target.wants/seatd.service"
 
 # Keep upstream boot mechanics while making every visible entry clearly ours.
 while IFS= read -r -d '' boot_config; do
@@ -66,6 +95,7 @@ sed -i \
     -e 's|^iso_application=.*|iso_application="protogenOS Live/Installation Media"|' \
     -e 's/^install_dir=.*/install_dir="protogenos"/' \
     -e '/^file_permissions=(/a\  ["/opt/protogenos/scripts/protogenos-install"]="0:0:755"' \
+    -e '/^file_permissions=(/a\  ["/opt/protogenos/scripts/protogenos-install-web"]="0:0:755"' \
     "${profile_definition}"
 
 echo "Prepared Archiso profile at ${target_profile}"

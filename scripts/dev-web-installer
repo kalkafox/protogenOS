@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Runs the web installer's backend + frontend directly on the dev host in
+# --dry-run mode: no ISO build, no QEMU boot, no root, no real disk writes.
+# Commands are logged instead of executed and system files land in a
+# throwaway /tmp directory. Open the printed vite URL in any browser.
+
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${project_root}"
+
+if ! command -v bun >/dev/null 2>&1; then
+    echo "dev-web-installer: bun was not found; install it from https://bun.sh" >&2
+    exit 1
+fi
+
+if [[ ! -d installer-web/node_modules ]]; then
+    (cd installer-web && bun install --frozen-lockfile)
+fi
+
+export PYTHONPATH="${project_root}/installer${PYTHONPATH:+:${PYTHONPATH}}"
+port=8765
+
+python3 -m protogenos_installer.webapi --port "${port}" --dry-run &
+api_pid=$!
+cleanup() {
+    kill "${api_pid}" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+for _ in $(seq 1 50); do
+    if curl -sf "http://127.0.0.1:${port}/api/personas" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+
+cd installer-web
+exec bun run dev

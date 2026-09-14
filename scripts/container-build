@@ -13,6 +13,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The builder image is cached between runs, so its archiso releng profile
+# (and keyring) goes stale as Arch drops/renames packages. Refresh them
+# before copying releng, otherwise mkarchiso fails with "target not found".
+pacman -Syu --noconfirm --needed archiso archlinux-keyring
+
 export PROTOGENOS_PROFILE_DIR="${build_root}/profile"
 export PROTOGENOS_WORK_DIR="${build_root}/work"
 export PROTOGENOS_OUTPUT_DIR="${build_root}/out"
