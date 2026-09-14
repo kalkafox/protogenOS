@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Standalone protogenOS ISO tester. Copy this file anywhere; no repo checkout needed.
+#
+#   ./try-iso protogenos.iso            # UEFI, fresh 40G disk
+#   ./try-iso protogenos.iso --bios     # legacy BIOS
+#   ./try-iso --boot-disk               # boot the installed system (no ISO)
+#
+# Requires: qemu-system-x86_64, qemu-img, and OVMF/edk2 firmware for UEFI.
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: try-iso [ISO] [options]
+
+  --bios         Legacy BIOS instead of UEFI
+  --boot-disk    Boot the existing disk without the ISO (after installing)
+  --disk PATH    Disk image (default: ./protogenos-test.qcow2, created if missing)
+  --size SIZE    Size for a new disk (default: 40G)
+  --memory MiB   Guest memory (default: 4096)
+  --cpus N       Virtual CPUs (default: 4)
+  --reset        Delete the disk and UEFI vars before starting
+  -h, --help     Show this help
+EOF
+}
+
+iso=""
+firmware=uefi
+boot_disk=false
+disk="./protogenos-test.qcow2"
+size=24G
+memory=4096
+cpus=4
+reset=false
+
+while (($#)); do
+    case "$1" in
+        --bios) firmware=bios; shift ;;
+        --boot-disk) boot_disk=true; shift ;;
+        --disk) disk="${2:?--disk needs a path}"; shift 2 ;;
+        --size) size="${2:?--size needs a value}"; shift 2 ;;
+        --memory) memory="${2:?--memory needs MiB}"; shift 2 ;;
+        --cpus) cpus="${2:?--cpus needs a count}"; shift 2 ;;
+        --reset) reset=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        -*) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+        *) iso="$1"; shift ;;
+    esac
+done
+
+die() { echo "error: $*" >&2; exit 1; }
+
+command -v qemu-system-x86_64 >/dev/null || die "qemu-system-x86_64 not found (Arch: qemu-desktop, Debian/Ubuntu: qemu-system-x86, Fedora: qemu-kvm)"
+command -v qemu-img >/dev/null || die "qemu-img not found"
+
+if [[ "${boot_disk}" == false ]]; then
+    [[ -n "${iso}" ]] || { usage >&2; die "pass the ISO path"; }
+    [[ -f "${iso}" ]] || die "ISO not found: ${iso}"
+fi
+
+vars="${disk%.qcow2}-OVMF_VARS.fd"
+if [[ "${reset}" == true ]]; then
+    rm -f -- "${disk}" "${vars}"
+fi
+
+if [[ ! -f "${disk}" ]]; then
+    [[ "${boot_disk}" == false ]] || die "disk not found: ${disk}"
+    qemu-img create -f qcow2 "${disk}" "${size}" >/dev/null
+    echo "Created ${disk} (${size})"
+fi
+
+args=(
+    -name protogenOS-test
+    -machine q35
+    -m "${memory}"
+    -smp "${cpus}"
+    -vga virtio
+    -device qemu-xhci -device usb-tablet
+    -nic user,model=virtio-net-pci
+    -drive "file=${disk},if=virtio,format=qcow2"
+)
+
+if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+    args+=(-enable-kvm -cpu host)
+else
+    echo "warning: /dev/kvm unavailable, falling back to slow software emulation" >&2
+    args+=(-accel tcg -cpu max)
+fi
+
+if [[ "${boot_disk}" == false ]]; then
+    args+=(-drive "file=${iso},media=cdrom,readonly=on" -boot order=dc,menu=on)
+fi
+
+if [[ "${firmware}" == uefi ]]; then
+    code=""
+    for pair in \
+        /usr/share/edk2/x64/OVMF_CODE.4m.fd:/usr/share/edk2/x64/OVMF_VARS.4m.fd \
+        /usr/share/OVMF/OVMF_CODE_4M.fd:/usr/share/OVMF/OVMF_VARS_4M.fd \
+        /usr/share/edk2/ovmf/OVMF_CODE.fd:/usr/share/edk2/ovmf/OVMF_VARS.fd \
+        /usr/share/OVMF/OVMF_CODE.fd:/usr/share/OVMF/OVMF_VARS.fd \
+        /usr/share/edk2-ovmf/x64/OVMF_CODE.fd:/usr/share/edk2-ovmf/x64/OVMF_VARS.fd; do
+        if [[ -f "${pair%%:*}" && -f "${pair##*:}" ]]; then
+            code="${pair%%:*}"
+            template="${pair##*:}"
+            break
+        fi
+    done
+    [[ -n "${code}" ]] || die "OVMF firmware not found (Arch: edk2-ovmf, Debian/Ubuntu: ovmf, Fedora: edk2-ovmf); or use --bios"
+    # Per-disk vars file so boot entries written by the installer persist.
+    [[ -f "${vars}" ]] || cp -- "${template}" "${vars}"
+    args+=(
+        -drive "if=pflash,format=raw,readonly=on,file=${code}"
+        -drive "if=pflash,format=raw,file=${vars}"
+    )
+fi
+
+echo "Starting QEMU (${firmware^^}, ${memory} MiB, ${cpus} CPUs)"
+exec qemu-system-x86_64 "${args[@]}"
