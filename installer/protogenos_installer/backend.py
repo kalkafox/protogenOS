@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
@@ -52,6 +53,9 @@ INSTALL_LOG = Path("/var/log/protogenos-install.log")
 # Distinct from pacman/makepkg/mkinitcpio's own "==>" output.
 STEP_PREFIX = "[protogenos] step "
 WARNING_PREFIX = "[protogenos] warning: "
+# pacman prints nothing useful while downloading into a pipe, so report the
+# package cache size this often to tell a slow download from a stuck one.
+HEARTBEAT_INTERVAL = 15.0
 # Built from source: prebuilt -bin helpers link a specific libalpm soname and
 # break whenever pacman bumps it.
 AUR_HELPER = "yay"
@@ -218,6 +222,9 @@ class CommandRunner:
     """
 
     stream_output = False
+    # Class-level so subclasses that skip __init__ still share it; heartbeat
+    # threads emit alongside the command-output loop.
+    _emit_lock = threading.Lock()
 
     def __init__(
         self, *, dry_run: bool = False, log_path: Path | None = None, quiet: bool = False
@@ -236,8 +243,9 @@ class CommandRunner:
                 self.log_path = None
 
     def emit(self, line: str) -> None:
-        if not getattr(self, "quiet", False):
-            print(line, flush=True)
+        with self._emit_lock:
+            if not getattr(self, "quiet", False):
+                print(line, flush=True)
         self._write_log(line)
 
     def _write_log(self, line: str) -> None:
@@ -245,7 +253,7 @@ class CommandRunner:
         if log_path is None:
             return
         try:
-            with log_path.open("a") as log:
+            with self._emit_lock, log_path.open("a") as log:
                 log.write(line + "\n")
         except OSError:
             pass
@@ -300,6 +308,59 @@ class CommandRunner:
         if check and returncode != 0:
             raise subprocess.CalledProcessError(returncode, args, output=output)
         return subprocess.CompletedProcess(args, returncode, output, "")
+
+
+def directory_size(path: Path) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(root, name)).st_size
+            except OSError:
+                # pacman renames .part files as downloads finish.
+                pass
+    return total
+
+
+class DownloadHeartbeat:
+    """Periodically emit the size of a download directory from a thread."""
+
+    def __init__(
+        self,
+        emit: Callable[[str], None],
+        path: Path,
+        *,
+        interval: float = HEARTBEAT_INTERVAL,
+    ) -> None:
+        self.emit = emit
+        self.path = path
+        self.interval = interval
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, name="download-heartbeat", daemon=True)
+
+    def __enter__(self) -> DownloadHeartbeat:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def _loop(self) -> None:
+        last_size = -1
+        unchanged = 0.0
+        while not self._stop.wait(self.interval):
+            size = directory_size(self.path)
+            if size == last_size:
+                unchanged += self.interval
+                # Also true while pacman unpacks already-downloaded packages.
+                self.emit(
+                    f"Package cache: {format_size(size)} (unchanged for {unchanged:.0f}s)"
+                )
+            else:
+                unchanged = 0.0
+                self.emit(f"Package cache: {format_size(size)} downloaded so far")
+            last_size = size
 
 
 def _mounted_paths(device: dict[str, object]) -> Iterable[str]:
@@ -731,17 +792,20 @@ class InstallerBackend:
             with tempfile.NamedTemporaryFile("w", prefix="protogenos-pacman-", delete=False) as file:
                 file.write(pacman_text)
                 temporary_path = file.name
-            self.runner.run(
-                [
-                    "pacstrap",
-                    "-K",
-                    "-P",
-                    "-C",
-                    temporary_path,
-                    str(self.target_root),
-                    *_unique(packages),
-                ]
-            )
+            # pacstrap without -c downloads into the target's own cache.
+            cache = self.target_root / "var/cache/pacman/pkg"
+            with DownloadHeartbeat(self.runner.emit, cache):
+                self.runner.run(
+                    [
+                        "pacstrap",
+                        "-K",
+                        "-P",
+                        "-C",
+                        temporary_path,
+                        str(self.target_root),
+                        *_unique(packages),
+                    ]
+                )
         finally:
             if temporary_path:
                 Path(temporary_path).unlink(missing_ok=True)

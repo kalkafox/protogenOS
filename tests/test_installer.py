@@ -2,11 +2,13 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
 from protogenos_installer.backend import (
     CommandRunner,
+    DownloadHeartbeat,
     InstallConfig,
     InstallError,
     InstallerBackend,
@@ -505,6 +507,25 @@ class InstallerBackendTests(unittest.TestCase):
             result = runner.run(["sh", "-c", "printf 'one\\rtwo\\nthree\\n'"])
         self.assertEqual(result.stdout, "two\nthree\n")
         self.assertIn("two\nthree\n", log_path.read_text())
+
+    def test_heartbeat_reports_growing_then_unchanged_cache(self) -> None:
+        cache = self.root / "cache"
+        cache.mkdir()
+        lines: list[str] = []
+        ready = threading.Event()
+
+        def emit(line: str) -> None:
+            lines.append(line)
+            if len(lines) == 1:
+                (cache / "linux.pkg.tar.zst.part").write_bytes(b"x" * 2048)
+            if len(lines) == 3:
+                ready.set()
+
+        with DownloadHeartbeat(emit, cache, interval=0.01):
+            self.assertTrue(ready.wait(5))
+        self.assertEqual(lines[0], "Package cache: 0.0 B downloaded so far")
+        self.assertEqual(lines[1], "Package cache: 2.0 KiB downloaded so far")
+        self.assertTrue(lines[2].startswith("Package cache: 2.0 KiB (unchanged for "))
 
     def test_aur_multilib_persisted_to_target_pacman_conf(self) -> None:
         runner = FakeRunner()
