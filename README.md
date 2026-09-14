@@ -80,17 +80,53 @@ days. Normal branch pushes do not start the comparatively expensive ISO build.
 
 ## Installer
 
-The live environment exposes the wizard as `protogenos-install`. It opens with
-a branded protogenOS title, asks whether the system is for General Use, Gaming,
-or Development, and resolves package alternatives into a reviewable plan. The
-wizard starts automatically on the primary live console; choose `0. Exit to
-shell` to close it without installing.
+The live environment starts the graphical installer (`protogenos-install-web`,
+a kiosk browser under cage) automatically on the primary console, and falls
+back to the text wizard (`protogenos-install`) on machines without a display
+device. Boot with `protogenos.installer=tui` to force the text wizard. Both
+open with a branded protogenOS title, ask whether the system is for General
+Use, Gaming, or Development, and resolve package alternatives into a
+reviewable plan. The graphical installer logs to
+`/tmp/protogenos-install-web.log`.
 
-Interactive mode can install that plan to an unused disk. The current backend
-uses a GPT layout, ext4 root filesystem, GRUB, NetworkManager, and SDDM. It
-supports both UEFI and legacy BIOS boot. Installation erases the entire selected
-disk and requires an exact `ERASE /dev/...` confirmation; preserving existing
-partitions, disk encryption, and custom filesystem layouts are not implemented.
+Both front ends start with the keyboard layout (applied immediately, and
+used for the installed console, desktop, and disk-unlock prompt), then make
+sure the live session is online, offering a Wi-Fi picker (iwd) when it is not;
+Wi-Fi networks joined live are copied into the installed system's
+NetworkManager.
+
+Installation options:
+
+- **Disk layout:** erase the whole disk, install alongside other systems in
+  the largest unallocated space (a new EFI partition is created; existing
+  partitions are untouched), or format an existing root partition and reuse
+  an EFI system partition. The last two require UEFI and GPT.
+- **Filesystems:** Btrfs (default; `@`, `@home`, `@log`, `@pkg`, and
+  `@snapshots` subvolumes with zstd compression), ext4, XFS, or F2FS.
+- **Encryption:** optional LUKS2 root with an initramfs unlock prompt. On BIOS
+  systems an unencrypted ext4 `/boot` partition is added automatically.
+- **Bootloader:** GRUB (UEFI or BIOS, with os-prober when installing alongside
+  other systems), systemd-boot, or Limine (UEFI only). UEFI installs mount the
+  EFI system partition at `/boot`.
+- **Swap:** zram (default) or none.
+- **System:** hostname, locale, timezone, mirror country (ranked with
+  reflector), optional kernel headers, the administrator account, and any
+  number of additional users. pacman's ParallelDownloads is enabled.
+- **Hardware:** CPU microcode, Mesa/Vulkan drivers, and hypervisor guest tools
+  are added for the detected hardware; time sync, TRIM, and Bluetooth are
+  enabled when present.
+
+The Arch keyring is refreshed before pacstrap. AUR packages are built with
+`yay` after the bootloader is installed, so a failed AUR build is reported as
+a warning instead of leaving an unbootable system. The command log is kept at
+`/var/log/protogenos-install.log`, and the chosen configuration (without
+passwords) at `/var/log/protogenos-install.json`, in both the live session
+and the installed system.
+
+Every install requires typing a confirmation that names what will be
+destroyed: `ERASE /dev/...`, `INSTALL /dev/...` (free space), or
+`FORMAT /dev/...` (existing partitions). After a text-mode install you can
+open a shell inside the new system before it is unmounted.
 
 From a repository checkout or the booted ISO, run:
 
@@ -102,7 +138,17 @@ protogenos-install                       # inside the live ISO
   --select browser=firefox,brave \
   --select gaming-launcher=steam,lutris \
   --allow-aur --non-interactive --output plan.json
+
+# Save choices for reuse, then install from them later (passwords live in a
+# separate credentials file; --unattended skips the typed confirmation).
+protogenos-install --save-config my-install.json
+protogenos-install --config my-install.json --creds creds.json
+protogenos-install --config my-install.json --creds creds.json --unattended
 ```
+
+A credentials file looks like
+`{"version": 1, "user_password": "...", "root_password": null,
+"encryption_passphrase": "...", "additional_users": {"kit": "..."}}`.
 
 The text banner lives in
 `installer/protogenos_installer/branding.py`. `INSTALLER_BANNER` is the intended
