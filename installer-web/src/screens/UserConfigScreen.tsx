@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 
-import { getMirrorCountries, validateConfig } from "@/api/client"
+import { getMirrorCountries, suggestLocale, validateConfig } from "@/api/client"
 import type { InstallConfig, MirrorCountry, SystemChoice, UserAccount } from "@/api/types"
 import { TimezoneSearch } from "@/components/TimezoneSearch"
 import { Button } from "@/components/ui/button"
@@ -26,11 +26,13 @@ const DEFAULT_SYSTEM: SystemChoice = {
 
 export function UserConfigScreen({
   value,
+  keyboardLayout,
   buildConfig,
   onBack,
   onNext,
 }: {
   value: SystemChoice | null
+  keyboardLayout: string
   buildConfig: (system: SystemChoice) => InstallConfig
   onBack: () => void
   onNext: (system: SystemChoice) => void
@@ -40,12 +42,27 @@ export function UserConfigScreen({
   const [countries, setCountries] = useState<MirrorCountry[]>([])
   const [error, setError] = useState<string | null>(null)
   const [checking, setChecking] = useState(false)
+  // Follow the timezone with a suggested locale until the user types one.
+  const [localeEdited, setLocaleEdited] = useState(value !== null)
 
   useEffect(() => {
     getMirrorCountries()
       .then((result) => setCountries(result.countries))
       .catch(() => setCountries([]))
   }, [])
+
+  useEffect(() => {
+    if (localeEdited) return
+    let cancelled = false
+    suggestLocale(draft.timezone, keyboardLayout)
+      .then((result) => {
+        if (!cancelled) setDraft((current) => ({ ...current, locale: result.locale }))
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [draft.timezone, keyboardLayout, localeEdited])
 
   const update = <K extends keyof SystemChoice>(key: K, next: SystemChoice[K]) =>
     setDraft((current) => ({ ...current, [key]: next }))
@@ -200,7 +217,17 @@ export function UserConfigScreen({
 
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="locale">Locale</Label>
-          <Input id="locale" value={draft.locale} onChange={(e) => update("locale", e.target.value)} />
+          <Input
+            id="locale"
+            value={draft.locale}
+            onChange={(e) => {
+              setLocaleEdited(true)
+              update("locale", e.target.value)
+            }}
+          />
+          {!localeEdited && (
+            <p className="text-muted-foreground text-xs">Suggested from your timezone and keyboard.</p>
+          )}
         </div>
 
         <div className="flex flex-col gap-1.5">

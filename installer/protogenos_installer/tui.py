@@ -34,6 +34,7 @@ from .branding import INSTALLER_BANNER, INSTALLER_TAGLINE
 from .features import feature_settings, offered_features
 from .hardware import detect_features, detect_hardware
 from .keyboard import console_keymap, list_layouts
+from .locales import suggest_locale
 from .mirrors import COUNTRY_PATTERN
 from .storage import GIB, MIN_ROOT_BYTES, DiskLayout, read_disk_layout
 from .models import InstallPlan, OptionGroup, PackageChoice
@@ -874,21 +875,21 @@ def _collect_install_config(
     if additional_users is None:
         return None
 
+    timezone = _select_timezone(stdscr, list_timezones())
+    if timezone is None:
+        return None
+
     locale = _text_input(
         stdscr,
         "System locale",
         "Locale:",
-        "en_US.UTF-8",
+        suggest_locale(timezone, keyboard[0]),
         lambda value: (
             bool(LOCALE_PATTERN.fullmatch(value)),
             "Use a UTF-8 locale such as en_US.UTF-8.",
         ),
     )
     if locale is None:
-        return None
-
-    timezone = _select_timezone(stdscr, list_timezones())
-    if timezone is None:
         return None
 
     mirror_country = _text_input(

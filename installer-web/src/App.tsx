@@ -211,6 +211,7 @@ function App() {
       {step === "config" && (
         <UserConfigScreen
           value={system}
+          keyboardLayout={keyboard.layout}
           buildConfig={buildConfig}
           onBack={() => setStep("features")}
           onNext={(choice) => {

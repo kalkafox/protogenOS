@@ -29,6 +29,7 @@ from .config_io import ConfigFileError, export_config, load_documents, read_json
 from .features import feature_settings, offered_features
 from .hardware import detect_features, detect_hardware
 from .keyboard import LAYOUT_PATTERN, VARIANT_PATTERN, console_keymap
+from .locales import suggest_locale
 from .mirrors import COUNTRY_PATTERN
 from .models import InstallPlan, OptionGroup
 from .network import is_online
@@ -276,13 +277,13 @@ def _choose_install_config(plan: InstallPlan, *, dry_run: bool = False) -> Insta
         USERNAME_PATTERN,
         "Start with a lowercase letter or underscore; use lowercase letters, numbers, _ or -.",
     )
+    timezone = input("Timezone [UTC]: ").strip() or "UTC"
     locale = _prompt_matching(
         "Locale",
-        "en_US.UTF-8",
+        suggest_locale(timezone, keyboard_layout),
         LOCALE_PATTERN,
         "Use a UTF-8 locale such as en_US.UTF-8.",
     )
-    timezone = input("Timezone [UTC]: ").strip() or "UTC"
     mirror_country = _prompt_matching(
         "Mirror country (empty for automatic)", "", re.compile(rf"^$|{COUNTRY_PATTERN.pattern}"), "Use a country name such as Germany."
     )

@@ -30,6 +30,7 @@ from .backend import (
     list_timezones,
 )
 from .hardware import detect_features, detect_hardware
+from .locales import suggest_locale
 from .keyboard import LAYOUT_PATTERN, VARIANT_PATTERN, console_keymap, list_layouts
 from .mirrors import parse_reflector_countries
 from .storage import StorageError, read_disk_layout
@@ -238,6 +239,11 @@ def make_handler(
                     self._handle_disks()
                 elif path == "/api/timezones" and method == "GET":
                     self._handle_timezones()
+                elif path == "/api/locales/suggest" and method == "GET":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        {"locale": suggest_locale(query.get("timezone", "UTC"), query.get("layout", ""))},
+                    )
                 elif path == "/api/config/validate" and method == "POST":
                     self._handle_validate()
                 elif path == "/api/install/start" and method == "POST":

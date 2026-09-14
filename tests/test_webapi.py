@@ -3,6 +3,7 @@ import json
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -56,6 +57,21 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(payload["firmware"], {"uefi", "bios"})
         self.assertFalse(payload["dry_run"])
+
+    def test_system_reports_optional_feature_support(self) -> None:
+        _, payload = _request(f"{self.base_url}/api/system")
+        self.assertEqual(
+            set(payload["features"]),
+            {"tpm2", "fingerprint_reader", "secure_boot_setup_mode", "secure_boot_enabled"},
+        )
+        self.assertIn("nvidia_open_supported", payload["hardware"])
+
+    def test_locale_suggestion(self) -> None:
+        with patch("protogenos_installer.webapi.suggest_locale", return_value="de_DE.UTF-8") as suggest:
+            status, payload = _request(f"{self.base_url}/api/locales/suggest?timezone=Europe/Berlin&layout=de")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"locale": "de_DE.UTF-8"})
+        suggest.assert_called_once_with("Europe/Berlin", "de")
 
     def test_reboot_refused_while_installing(self) -> None:
         self.assertTrue(self.session.start())

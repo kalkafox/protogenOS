@@ -108,6 +108,11 @@ export function getTimezones(): Promise<{ timezones: string[] }> {
   return request("/api/timezones")
 }
 
+export function suggestLocale(timezone: string, layout: string): Promise<{ locale: string }> {
+  const query = new URLSearchParams({ timezone, layout })
+  return request(`/api/locales/suggest?${query}`)
+}
+
 export function validateConfig(
   config: Partial<InstallConfig>
 ): Promise<{ valid: boolean; error?: string }> {
