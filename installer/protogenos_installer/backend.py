@@ -1,4 +1,4 @@
-"""Guarded whole-disk installation backend for protogenOS."""
+"""Installation backend for protogenOS: validates choices and drives the install."""
 
 from __future__ import annotations
 
@@ -11,14 +11,68 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
+from . import bootloader as boot
+from .config_io import export_config
+from .hardware import HardwareProfile, detect_hardware
+from .keyboard import (
+    LAYOUT_PATTERN,
+    VARIANT_PATTERN,
+    console_keymap,
+    plasma_kxkbrc,
+    vconsole_conf,
+    x11_keyboard_conf,
+)
+from .mirrors import COUNTRY_PATTERN, enable_parallel_downloads, reflector_command
 from .models import InstallPlan
+from .network import (
+    IWD_STORAGE,
+    is_online,
+    iwd_file_name,
+    networkmanager_keyfile,
+    read_iwd_credentials,
+)
+from .storage import (
+    FILESYSTEM_PACKAGES,
+    FILESYSTEM_TOOLS,
+    GIB,
+    MIN_ROOT_BYTES,
+    PreparedStorage,
+    StorageError,
+    StorageManager,
+    partition_path,
+)
 
 
 HOSTNAME_PATTERN = re.compile(r"^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$")
 USERNAME_PATTERN = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 LOCALE_PATTERN = re.compile(r"^[A-Za-z]{2,3}_[A-Za-z]{2,3}\.UTF-8$")
+INSTALL_LOG = Path("/var/log/protogenos-install.log")
+# Distinct from pacman/makepkg/mkinitcpio's own "==>" output.
+STEP_PREFIX = "[protogenos] step "
+WARNING_PREFIX = "[protogenos] warning: "
+# Built from source: prebuilt -bin helpers link a specific libalpm soname and
+# break whenever pacman bumps it.
+AUR_HELPER = "yay"
+AUR_HELPER_INSTALL = (
+    "yay -S --noconfirm --needed --answerdiff None --answerclean None --removemake"
+)
+
+DISK_LAYOUTS = ("erase", "free-space", "partitions")
+FILESYSTEMS = ("btrfs", "ext4", "xfs", "f2fs")
+BOOTLOADERS = ("grub", "systemd-boot", "limine")
+SWAP_MODES = ("zram", "none")
+ZRAM_GENERATOR_CONF = """[zram0]
+zram-size = min(ram / 2, 8192)
+compression-algorithm = zstd
+"""
+# Arch Wiki recommendations for swap on zram.
+ZRAM_SYSCTL_CONF = """vm.swappiness = 180
+vm.watermark_boost_factor = 0
+vm.watermark_scale_factor = 125
+vm.page-cluster = 0
+"""
 
 
 class InstallError(RuntimeError):
@@ -35,6 +89,17 @@ class DiskInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class UserAccount:
+    username: str
+    password: str = field(repr=False)
+    sudo: bool = False
+
+
+def _is_console_typable(value: str) -> bool:
+    return all(32 <= ord(character) <= 126 for character in value)
+
+
+@dataclass(frozen=True, slots=True)
 class InstallConfig:
     disk: str
     firmware: str
@@ -45,12 +110,37 @@ class InstallConfig:
     locale: str = "en_US.UTF-8"
     grant_sudo: bool = True
     root_password: str | None = field(default=None, repr=False)
+    filesystem: str = "btrfs"
+    disk_partitioned: bool = True
+    disk_layout: str = "erase"
+    root_partition: str | None = None
+    boot_partition: str | None = None
+    format_boot: bool = False
+    encrypt: bool = False
+    encryption_passphrase: str | None = field(default=None, repr=False)
+    bootloader: str = "grub"
+    swap: str = "zram"
+    keyboard_layout: str = "us"
+    keyboard_variant: str = ""
+    mirror_country: str = ""
+    kernel_headers: bool = False
+    additional_users: tuple[UserAccount, ...] = ()
+
+    def __post_init__(self) -> None:
+        # JSON callers (web API, config files) pass users as plain objects.
+        users = tuple(
+            user if isinstance(user, UserAccount) else UserAccount(**user)
+            for user in (self.additional_users or ())
+        )
+        object.__setattr__(self, "additional_users", users)
 
     def validate(self, zoneinfo_root: Path = Path("/usr/share/zoneinfo")) -> None:
         if not self.disk.startswith("/dev/") or not Path(self.disk).name:
             raise InstallError(f"invalid target disk: {self.disk!r}")
         if self.firmware not in {"uefi", "bios"}:
             raise InstallError("firmware must be 'uefi' or 'bios'")
+        if self.filesystem not in FILESYSTEMS:
+            raise InstallError(f"filesystem must be one of: {', '.join(FILESYSTEMS)}")
         if not HOSTNAME_PATTERN.fullmatch(self.hostname):
             raise InstallError("hostname must contain only letters, numbers, and hyphens")
         if not USERNAME_PATTERN.fullmatch(self.username):
@@ -70,10 +160,95 @@ class InstallConfig:
             raise InstallError("timezone escapes the zoneinfo directory") from error
         if not timezone_path.is_file():
             raise InstallError(f"unknown timezone: {self.timezone}")
+        self._validate_storage()
+        if self.bootloader not in BOOTLOADERS:
+            raise InstallError(f"bootloader must be one of: {', '.join(BOOTLOADERS)}")
+        if self.bootloader != "grub" and self.firmware != "uefi":
+            raise InstallError(f"{self.bootloader} requires UEFI; use GRUB for BIOS systems")
+        if self.swap not in SWAP_MODES:
+            raise InstallError(f"swap must be one of: {', '.join(SWAP_MODES)}")
+        if not LAYOUT_PATTERN.fullmatch(self.keyboard_layout):
+            raise InstallError(f"invalid keyboard layout: {self.keyboard_layout!r}")
+        if not VARIANT_PATTERN.fullmatch(self.keyboard_variant):
+            raise InstallError(f"invalid keyboard variant: {self.keyboard_variant!r}")
+        if self.mirror_country and not COUNTRY_PATTERN.fullmatch(self.mirror_country):
+            raise InstallError(f"invalid mirror country: {self.mirror_country!r}")
+        self._validate_additional_users()
+
+    def _validate_storage(self) -> None:
+        if self.disk_layout not in DISK_LAYOUTS:
+            raise InstallError(f"disk layout must be one of: {', '.join(DISK_LAYOUTS)}")
+        if self.disk_layout != "erase" and self.firmware != "uefi":
+            raise InstallError("installing alongside existing partitions requires UEFI")
+        if self.disk_layout == "partitions":
+            if not self.root_partition or not self.boot_partition:
+                raise InstallError("choose both a root partition and an EFI system partition")
+            for partition in (self.root_partition, self.boot_partition):
+                if not partition.startswith(self.disk) or partition == self.disk:
+                    raise InstallError(f"{partition} is not a partition of {self.disk}")
+            if self.root_partition == self.boot_partition:
+                raise InstallError("root and EFI system partitions must be different")
+        if self.encrypt:
+            passphrase = self.encryption_passphrase or ""
+            if len(passphrase) < 8:
+                raise InstallError("encryption passphrase must be at least 8 characters")
+            if not _is_console_typable(passphrase):
+                # The early-boot prompt only reliably accepts printable ASCII.
+                raise InstallError("encryption passphrase must use printable ASCII characters")
+
+    def _validate_additional_users(self) -> None:
+        seen = {self.username, "root"}
+        for user in self.additional_users:
+            if not USERNAME_PATTERN.fullmatch(user.username):
+                raise InstallError(f"invalid user name: {user.username!r}")
+            if user.username in seen:
+                raise InstallError(f"user name {user.username!r} is already taken")
+            if not user.password:
+                raise InstallError(f"password for {user.username} cannot be empty")
+            seen.add(user.username)
 
 
 class CommandRunner:
-    """Execute commands without invoking a shell or printing secret input."""
+    """Execute commands without invoking a shell or printing secret input.
+
+    With a log_path, command output is streamed line by line into both the
+    terminal and the log instead of inheriting the terminal directly, so
+    only installation runners should set it (interactive tools like cfdisk
+    need the real terminal).
+    """
+
+    stream_output = False
+
+    def __init__(
+        self, *, dry_run: bool = False, log_path: Path | None = None, quiet: bool = False
+    ) -> None:
+        self.dry_run = dry_run
+        self.log_path = log_path
+        # Quiet runners (used under curses) skip echoing commands to the terminal.
+        self.quiet = quiet
+        if log_path is not None:
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.touch(mode=0o600, exist_ok=True)
+            except OSError:
+                # Not root (the backend reports that clearly later) or a
+                # read-only filesystem: keep going without a log file.
+                self.log_path = None
+
+    def emit(self, line: str) -> None:
+        if not getattr(self, "quiet", False):
+            print(line, flush=True)
+        self._write_log(line)
+
+    def _write_log(self, line: str) -> None:
+        log_path = getattr(self, "log_path", None)
+        if log_path is None:
+            return
+        try:
+            with log_path.open("a") as log:
+                log.write(line + "\n")
+        except OSError:
+            pass
 
     def run(
         self,
@@ -83,15 +258,48 @@ class CommandRunner:
         capture_output: bool = False,
         check: bool = True,
     ) -> subprocess.CompletedProcess[str]:
-        print(f"+ {shlex.join(args)}")
-        return subprocess.run(
+        self.emit(f"+ {shlex.join(args)}")
+        if self.dry_run:
+            self.emit("  (dry-run: not executed)")
+            stdout = "" if capture_output else None
+            stderr = "" if capture_output else None
+            return subprocess.CompletedProcess(args, 0, stdout, stderr)
+        if capture_output or not (self.stream_output or self.log_path is not None):
+            return subprocess.run(
+                args,
+                check=check,
+                text=True,
+                input=input_text,
+                stdout=subprocess.PIPE if capture_output else None,
+                stderr=subprocess.PIPE if capture_output else None,
+            )
+        # Binary pipes: text mode would turn pacman's progress-bar carriage
+        # returns into newlines and flood the log with partial redraws.
+        process = subprocess.Popen(
             args,
-            check=check,
-            text=True,
-            input=input_text,
-            stdout=subprocess.PIPE if capture_output else None,
-            stderr=subprocess.PIPE if capture_output else None,
+            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
         )
+        if input_text is not None:
+            assert process.stdin is not None
+            process.stdin.write(input_text.encode())
+            process.stdin.close()
+        output_lines: list[str] = []
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            text = raw_line.decode("utf-8", errors="replace").rstrip("\n")
+            # Keep only the final redraw of a carriage-return-updated line.
+            line = text.rstrip("\r").rsplit("\r", 1)[-1]
+            output_lines.append(line)
+            self.emit(line)
+        returncode = process.wait()
+        output = "\n".join(output_lines)
+        if output:
+            output += "\n"
+        if check and returncode != 0:
+            raise subprocess.CalledProcessError(returncode, args, output=output)
+        return subprocess.CompletedProcess(args, returncode, output, "")
 
 
 def _mounted_paths(device: dict[str, object]) -> Iterable[str]:
@@ -109,6 +317,7 @@ def list_install_disks(runner: CommandRunner | None = None) -> tuple[DiskInfo, .
         [
             "lsblk",
             "--json",
+            "--tree",  # without NAME in --output, lsblk otherwise flattens partitions
             "--bytes",
             "--output",
             "PATH,SIZE,TYPE,MODEL,RO,RM,MOUNTPOINTS",
@@ -137,9 +346,80 @@ def list_install_disks(runner: CommandRunner | None = None) -> tuple[DiskInfo, .
     return tuple(disks)
 
 
-def partition_path(disk: str, number: int) -> str:
-    separator = "p" if Path(disk).name[-1].isdigit() else ""
-    return f"{disk}{separator}{number}"
+_TIMEZONE_SKIP_NAMES = {
+    "zone.tab",
+    "zone1970.tab",
+    "iso3166.tab",
+    "tzdata.zi",
+    "leapseconds",
+    "Factory",
+    "posixrules",
+    "leap-seconds.list",
+}
+
+# Common abbreviations users type that don't appear verbatim in IANA zone
+# names, mapped to a keyword that does (e.g. "AST" -> Atlantic/* zones).
+TIMEZONE_ABBREVIATION_HINTS = {
+    "ast": "atlantic",
+    "adt": "atlantic",
+    "est": "eastern",
+    "edt": "eastern",
+    "cst": "central",
+    "cdt": "central",
+    "mst": "mountain",
+    "mdt": "mountain",
+    "pst": "pacific",
+    "pdt": "pacific",
+    "akst": "alaska",
+    "hst": "hawaii",
+    "gmt": "utc",
+    "bst": "london",
+    "cet": "paris",
+    "eet": "athens",
+    "jst": "tokyo",
+    "aest": "sydney",
+    "acst": "adelaide",
+    "awst": "perth",
+    "ist": "kolkata",
+}
+
+
+def list_timezones(zoneinfo_root: Path = Path("/usr/share/zoneinfo")) -> tuple[str, ...]:
+    zones: list[str] = []
+    if not zoneinfo_root.is_dir():
+        return ()
+    for path in zoneinfo_root.rglob("*"):
+        if not path.is_file():
+            continue
+        name = str(path.relative_to(zoneinfo_root))
+        if name in _TIMEZONE_SKIP_NAMES or name.startswith("."):
+            continue
+        if name.startswith(("posix/", "right/")):
+            continue
+        zones.append(name)
+    return tuple(sorted(zones))
+
+
+def matches_timezone_query(name: str, query: str) -> bool:
+    lowered = query.strip().lower()
+    if not lowered:
+        return True
+    haystack = name.replace("_", " ").replace("/", " ").lower()
+    words = [word for word in re.split(r"\s+", lowered) if word]
+    for word in words:
+        candidate = TIMEZONE_ABBREVIATION_HINTS.get(word, word)
+        if candidate not in haystack and word not in haystack:
+            return False
+    return True
+
+
+def search_timezones(zones: Sequence[str], query: str) -> tuple[str, ...]:
+    return tuple(zone for zone in zones if matches_timezone_query(zone, query))
+
+
+def detect_firmware(efi_dir: Path = Path("/sys/firmware/efi")) -> str:
+    """Return the boot mode the live environment was started with."""
+    return "uefi" if efi_dir.is_dir() else "bios"
 
 
 def format_size(size: int) -> str:
@@ -178,6 +458,7 @@ def _unique(items: Iterable[str]) -> tuple[str, ...]:
 class InstallerBackend:
     REQUIRED_COMMANDS = (
         "arch-chroot",
+        "blkid",
         "blockdev",
         "genfstab",
         "findmnt",
@@ -198,48 +479,143 @@ class InstallerBackend:
         self,
         runner: CommandRunner | None = None,
         *,
-        target_root: Path = Path("/mnt"),
+        target_root: Path | None = None,
         pacman_config: Path = Path("/etc/pacman.conf"),
         zoneinfo_root: Path = Path("/usr/share/zoneinfo"),
         locale_gen: Path = Path("/etc/locale.gen"),
         require_root: bool = True,
+        dry_run: bool = False,
+        online_check: Callable[[], bool] = is_online,
+        hardware_detector: Callable[..., HardwareProfile] = detect_hardware,
+        iwd_storage: Path = IWD_STORAGE,
+        keymap_resolver: Callable[[str, str], str] = console_keymap,
     ) -> None:
-        self.runner = runner or CommandRunner()
+        if target_root is None:
+            # Dry-run defaults to a throwaway directory so it's safe even if
+            # a caller forgets to pick one; real installs keep using /mnt.
+            target_root = Path(tempfile.mkdtemp(prefix="protogenos-dryrun-")) if dry_run else Path("/mnt")
+        if runner is None:
+            log_path = target_root.parent / f"{target_root.name}-install.log" if dry_run else INSTALL_LOG
+            runner = CommandRunner(dry_run=dry_run, log_path=log_path)
+        self.runner = runner
         self.target_root = target_root
         self.pacman_config = pacman_config
         self.zoneinfo_root = zoneinfo_root
         self.locale_gen = locale_gen
         self.require_root = require_root
+        self.dry_run = dry_run
+        self.online_check = online_check
+        self.hardware_detector = hardware_detector
+        self.iwd_storage = iwd_storage
+        self.keymap_resolver = keymap_resolver
+        self.warnings: list[str] = []
+        self._step_index = 0
+        self._step_total = 0
 
-    def install(self, plan: InstallPlan, config: InstallConfig) -> None:
+    def install(
+        self,
+        plan: InstallPlan,
+        config: InstallConfig,
+        *,
+        before_unmount: Callable[[Path], None] | None = None,
+    ) -> None:
+        """Run the whole installation.
+
+        before_unmount runs after a successful install while the new system
+        is still mounted (the CLI uses it to offer a chroot shell).
+        """
         config.validate(self.zoneinfo_root)
+        self._step_index = 0
+        self._step_total = 7 if plan.aur_packages else 6
+        self.warnings = []
+        self._step("Checking the installation environment")
         self._validate_environment(config)
-        mount_attempted = False
+        storage = StorageManager(self.runner, self.target_root, dry_run=self.dry_run)
         try:
-            root_partition, boot_partition = self._partition_disk(config)
-            mount_attempted = True
-            self._format_and_mount(config, root_partition, boot_partition)
-            self._install_packages(plan, config)
+            self._step("Preparing disks")
+            if self.dry_run:
+                self.target_root.mkdir(parents=True, exist_ok=True)
+            prepared = storage.prepare(config)
+            if self.dry_run:
+                self._seed_dry_run_root(config)
+
+            self._step("Installing packages")
+            hardware = self.hardware_detector(multilib=plan.multilib_required)
+            self.runner.emit(f"Detected hardware: {hardware.describe()}")
+            self._select_mirrors(config)
+            self._refresh_keyring()
+            keymap = self.keymap_resolver(config.keyboard_layout, config.keyboard_variant)
+            # Before pacstrap: the initramfs it builds embeds the console
+            # keymap used at the disk-unlock prompt.
+            self._write_target("etc/vconsole.conf", vconsole_conf(keymap))
+            self._install_packages(plan, config, hardware)
             self._write_fstab()
-            self._configure_system(plan, config)
-            self._install_aur_packages(plan, config)
-            self._install_bootloader(config)
+
+            self._step("Configuring the system")
+            self._configure_system(plan, config, hardware)
+            self._copy_network_config()
+
+            self._step("Installing the bootloader")
+            # Bootloader goes before optional AUR builds so a failed build
+            # can never leave an unbootable system behind.
+            self._configure_initramfs(config)
+            self._install_bootloader(plan, config, prepared)
+
+            if plan.aur_packages:
+                self._step("Building AUR packages")
+                self._install_aur_packages(plan, config)
+
+            self._step("Finishing up")
+            for warning in self.warnings:
+                self.runner.emit(f"{WARNING_PREFIX}{warning}")
+            self._write_target(
+                "var/log/protogenos-install.json",
+                json.dumps(export_config(plan, config), indent=2) + "\n",
+            )
+            self._copy_install_log()
+            if before_unmount is not None:
+                before_unmount(self.target_root)
             self.runner.run(["sync"])
+        except StorageError as error:
+            raise InstallError(str(error)) from error
+        except boot.BootConfigError as error:
+            raise InstallError(str(error)) from error
         except (OSError, subprocess.CalledProcessError) as error:
             raise InstallError(f"installation command failed: {error}") from error
         finally:
-            if mount_attempted:
-                self.runner.run(
-                    ["umount", "--recursive", str(self.target_root)], check=False
-                )
+            storage.teardown()
+
+    def _step(self, title: str) -> None:
+        self._step_index += 1
+        self.runner.emit(f"{STEP_PREFIX}{self._step_index}/{self._step_total}: {title}")
+
+    def _warn(self, message: str) -> None:
+        self.warnings.append(message)
+        self.runner.emit(f"{WARNING_PREFIX}{message}")
+
+    # -- validation -------------------------------------------------------
+
+    def _required_commands(self, config: InstallConfig) -> tuple[str, ...]:
+        commands = list(self.REQUIRED_COMMANDS)
+        commands += FILESYSTEM_TOOLS[config.filesystem]
+        if config.encrypt:
+            commands.append("cryptsetup")
+        if config.mirror_country:
+            commands.append("reflector")
+        return tuple(commands)
 
     def _validate_environment(self, config: InstallConfig) -> None:
         disk = config.disk
-        if self.require_root and os.geteuid() != 0:
-            raise InstallError("installation must run as root")
-        missing = [command for command in self.REQUIRED_COMMANDS if shutil.which(command) is None]
-        if missing:
-            raise InstallError(f"missing installation tools: {', '.join(missing)}")
+        if not self.dry_run:
+            if self.require_root and os.geteuid() != 0:
+                raise InstallError("installation must run as root")
+            missing = [
+                command
+                for command in self._required_commands(config)
+                if shutil.which(command) is None
+            ]
+            if missing:
+                raise InstallError(f"missing installation tools: {', '.join(missing)}")
         if not self.locale_gen.is_file():
             raise InstallError(f"locale catalog is unavailable: {self.locale_gen}")
         locale_pattern = re.compile(
@@ -247,6 +623,16 @@ class InstallerBackend:
         )
         if not locale_pattern.search(self.locale_gen.read_text()):
             raise InstallError(f"locale is unavailable: {config.locale}")
+        if self.dry_run:
+            # Real disks aren't touched in dry-run mode, so the block-device
+            # and mount-state checks below (which assume a real target) are
+            # skipped; CommandRunner no-ops every command regardless.
+            return
+        if not self.online_check():
+            raise InstallError(
+                "no internet connection; packages are downloaded during installation. "
+                "Connect with Ethernet or Wi-Fi (iwctl) and try again"
+            )
         if not Path(disk).is_block_device():
             raise InstallError(f"target is not a block device: {disk}")
         size_result = self.runner.run(
@@ -256,8 +642,8 @@ class InstallerBackend:
             disk_size = int(size_result.stdout.strip())
         except ValueError as error:
             raise InstallError(f"could not determine target disk size: {disk}") from error
-        if disk_size < 16 * 1024**3:
-            raise InstallError("target disk must be at least 16 GiB")
+        if disk_size < MIN_ROOT_BYTES:
+            raise InstallError(f"target disk must be at least {MIN_ROOT_BYTES // GIB} GiB")
         target_mount = self.runner.run(
             ["findmnt", "--noheadings", "--mountpoint", str(self.target_root)],
             capture_output=True,
@@ -265,66 +651,79 @@ class InstallerBackend:
         )
         if target_mount.returncode == 0:
             raise InstallError(f"installation mount point is already in use: {self.target_root}")
-        mounted = self.runner.run(
-            ["lsblk", "--noheadings", "--raw", "--output", "MOUNTPOINTS", disk],
-            capture_output=True,
-            check=False,
+        if config.disk_layout == "erase":
+            mounted = self.runner.run(
+                ["lsblk", "--noheadings", "--raw", "--output", "MOUNTPOINTS", disk],
+                capture_output=True,
+                check=False,
+            )
+            if mounted.returncode == 0 and mounted.stdout.strip():
+                raise InstallError(f"target disk or one of its partitions is mounted: {disk}")
+
+    def _seed_dry_run_root(self, config: InstallConfig) -> None:
+        """Fake the handful of pacstrap-produced files later steps read/edit.
+
+        No real rootfs exists in dry-run mode (partitioning/pacstrap are
+        no-ops), so later steps would otherwise hit missing files.
+        """
+        self._write_target("etc/locale.gen", f"#{config.locale} UTF-8\n")
+        self._write_target("etc/default/grub", "GRUB_TIMEOUT=5\n")
+        self._write_target(
+            "etc/mkinitcpio.conf",
+            "HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block filesystems fsck)\n",
         )
-        if mounted.returncode == 0 and mounted.stdout.strip():
-            raise InstallError(f"target disk or one of its partitions is mounted: {disk}")
 
-    def _partition_disk(self, config: InstallConfig) -> tuple[str, str | None]:
-        disk = config.disk
-        self.runner.run(["wipefs", "--all", "--force", disk])
-        self.runner.run(["parted", "--script", disk, "mklabel", "gpt"])
-        if config.firmware == "uefi":
-            self.runner.run(
-                ["parted", "--script", disk, "mkpart", "ESP", "fat32", "1MiB", "1025MiB"]
-            )
-            self.runner.run(["parted", "--script", disk, "set", "1", "esp", "on"])
-            self.runner.run(
-                ["parted", "--script", disk, "mkpart", "root", "ext4", "1025MiB", "100%"]
-            )
-            root_partition = partition_path(disk, 2)
-            boot_partition: str | None = partition_path(disk, 1)
-        else:
-            self.runner.run(
-                ["parted", "--script", disk, "mkpart", "BIOSBOOT", "1MiB", "3MiB"]
-            )
-            self.runner.run(["parted", "--script", disk, "set", "1", "bios_grub", "on"])
-            self.runner.run(
-                ["parted", "--script", disk, "mkpart", "root", "ext4", "3MiB", "100%"]
-            )
-            root_partition = partition_path(disk, 2)
-            boot_partition = None
-        self.runner.run(["partprobe", disk])
-        self.runner.run(["udevadm", "settle"])
-        return root_partition, boot_partition
+    # -- packages ---------------------------------------------------------
 
-    def _format_and_mount(
-        self, config: InstallConfig, root_partition: str, boot_partition: str | None
+    def _select_mirrors(self, config: InstallConfig) -> None:
+        if not config.mirror_country:
+            return
+        result = self.runner.run(reflector_command(config.mirror_country), check=False)
+        if result.returncode != 0:
+            self._warn(
+                f"could not rank mirrors for {config.mirror_country}; using the default mirror list"
+            )
+
+    def _refresh_keyring(self) -> None:
+        # Signing keys rotate; an older ISO's keyring rejects current packages.
+        self.runner.run(["pacman", "-Sy", "--noconfirm", "--needed", "archlinux-keyring"])
+
+    @staticmethod
+    def kernel_package(plan: InstallPlan) -> str:
+        return (plan.selections.get("kernel") or ("linux",))[0]
+
+    def _install_packages(
+        self,
+        plan: InstallPlan,
+        config: InstallConfig,
+        hardware: HardwareProfile | None = None,
     ) -> None:
-        self.runner.run(["mkfs.ext4", "-F", "-L", "protogenos", root_partition])
-        self.target_root.mkdir(parents=True, exist_ok=True)
-        self.runner.run(["mount", root_partition, str(self.target_root)])
-        if config.firmware == "uefi":
-            if boot_partition is None:
-                raise InstallError("UEFI installation is missing an EFI partition")
-            self.runner.run(["mkfs.fat", "-F", "32", "-n", "PROTOEFI", boot_partition])
-            efi_path = self.target_root / "boot/efi"
-            efi_path.mkdir(parents=True, exist_ok=True)
-            self.runner.run(["mount", boot_partition, str(efi_path)])
-
-    def _install_packages(self, plan: InstallPlan, config: InstallConfig) -> None:
         aur = set(plan.aur_packages)
         packages = [package for package in plan.packages if package not in aur]
-        packages.extend(("grub", "sudo"))
+        packages.extend(("sudo", "nano", "man-db", "bash-completion"))
+        packages.append(FILESYSTEM_PACKAGES[config.filesystem])
         if config.firmware == "uefi":
-            packages.append("efibootmgr")
+            packages.append("dosfstools")
+        if config.bootloader == "grub":
+            packages.append("grub")
+            if config.firmware == "uefi":
+                packages.append("efibootmgr")
+            if config.disk_layout != "erase":
+                packages.append("os-prober")
+        elif config.bootloader == "limine":
+            packages.extend(("limine", "efibootmgr"))
+        if config.encrypt:
+            packages.append("cryptsetup")
+        if config.swap == "zram":
+            packages.append("zram-generator")
+        if config.kernel_headers:
+            packages.append(f"{self.kernel_package(plan)}-headers")
+        if hardware is not None:
+            packages.extend(hardware.packages)
         if plan.aur_packages:
             packages.extend(("base-devel", "git"))
 
-        pacman_text = self.pacman_config.read_text()
+        pacman_text = enable_parallel_downloads(self.pacman_config.read_text())
         if plan.multilib_required:
             pacman_text = enable_multilib(pacman_text)
         temporary_path = ""
@@ -346,14 +745,25 @@ class InstallerBackend:
         finally:
             if temporary_path:
                 Path(temporary_path).unlink(missing_ok=True)
+        self._write_target("etc/pacman.conf", pacman_text)
 
     def _write_fstab(self) -> None:
         result = self.runner.run(
             ["genfstab", "-U", str(self.target_root)], capture_output=True
         )
-        self._write_target("etc/fstab", result.stdout)
+        # subvolid pins a btrfs mount to one subvolume ID and breaks
+        # snapshot rollbacks; subvol= alone is enough.
+        fstab = re.sub(r"subvolid=\d+,?|,subvolid=\d+", "", result.stdout or "")
+        self._write_target("etc/fstab", fstab)
 
-    def _configure_system(self, plan: InstallPlan, config: InstallConfig) -> None:
+    # -- system configuration --------------------------------------------
+
+    def _configure_system(
+        self,
+        plan: InstallPlan,
+        config: InstallConfig,
+        hardware: HardwareProfile | None = None,
+    ) -> None:
         self._write_target("etc/hostname", f"{config.hostname}\n")
         self._write_target(
             "etc/hosts",
@@ -364,30 +774,218 @@ class InstallerBackend:
         self._write_target("etc/locale.conf", f"LANG={config.locale}\n")
         self._enable_locale(config.locale)
         self._write_release_metadata(plan)
-        self._set_grub_branding()
+        self._apply_desktop_theming(plan)
+        self._configure_keyboard(config)
+        if config.swap == "zram":
+            self._write_target("etc/systemd/zram-generator.conf", ZRAM_GENERATOR_CONF)
+            self._write_target("etc/sysctl.d/99-vm-zram-parameters.conf", ZRAM_SYSCTL_CONF)
 
         self._chroot("ln", "-sf", f"/usr/share/zoneinfo/{config.timezone}", "/etc/localtime")
         self._chroot("hwclock", "--systohc")
         self._chroot("locale-gen")
-        useradd_args = ["useradd", "--create-home", "--shell", "/bin/bash"]
-        if config.grant_sudo:
-            useradd_args += ["--groups", "wheel"]
-        useradd_args.append(config.username)
-        self._chroot(*useradd_args)
-        self._chroot(
-            "chpasswd", input_text=f"{config.username}:{config.user_password}\n"
-        )
-        if config.grant_sudo:
-            self._chroot("passwd", "--lock", "root")
+        self._create_users(config)
+        self._enable_services(hardware)
+
+    def _configure_keyboard(self, config: InstallConfig) -> None:
+        layout, variant = config.keyboard_layout, config.keyboard_variant
+        self._write_target("etc/X11/xorg.conf.d/00-keyboard.conf", x11_keyboard_conf(layout, variant))
+        # Plasma reads its own kxkbrc once a user has one; seed new accounts.
+        self._write_target("etc/skel/.config/kxkbrc", plasma_kxkbrc(layout, variant))
+
+    def _create_users(self, config: InstallConfig) -> None:
+        accounts = [UserAccount(config.username, config.user_password, config.grant_sudo)]
+        accounts += list(config.additional_users)
+        for account in accounts:
+            useradd_args = ["useradd", "--create-home", "--shell", "/bin/bash"]
+            if account.sudo:
+                useradd_args += ["--groups", "wheel"]
+            useradd_args.append(account.username)
+            self._chroot(*useradd_args)
+            self._chroot("chpasswd", input_text=f"{account.username}:{account.password}\n")
+        if any(account.sudo for account in accounts):
             sudoers = self.target_root / "etc/sudoers.d/10-protogenos-wheel"
             sudoers.parent.mkdir(parents=True, exist_ok=True)
             sudoers.write_text("%wheel ALL=(ALL:ALL) ALL\n")
             sudoers.chmod(0o440)
+        if config.grant_sudo:
+            self._chroot("passwd", "--lock", "root")
         else:
-            self._chroot(
-                "chpasswd", input_text=f"root:{config.root_password}\n"
+            self._chroot("chpasswd", input_text=f"root:{config.root_password}\n")
+
+    # Enabled only when the installed packages actually ship the unit.
+    OPTIONAL_SERVICES = ("bluetooth.service", "cups.socket", "power-profiles-daemon.service")
+
+    def _enable_services(self, hardware: HardwareProfile | None) -> None:
+        services = [
+            "NetworkManager.service",
+            "sddm.service",
+            "systemd-timesyncd.service",
+            "fstrim.timer",
+        ]
+        candidates = [*self.OPTIONAL_SERVICES, *(hardware.services if hardware else ())]
+        for unit in candidates:
+            if (self.target_root / "usr/lib/systemd/system" / unit).exists():
+                services.append(unit)
+        self._chroot("systemctl", "enable", *services)
+
+    def _copy_network_config(self) -> None:
+        """Carry Wi-Fi networks joined in the live session into NetworkManager."""
+        credentials = read_iwd_credentials(self.iwd_storage)
+        for credential in credentials:
+            name = iwd_file_name(credential.ssid, "nmconnection")
+            path = self.target_root / "etc/NetworkManager/system-connections" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch(mode=0o600, exist_ok=True)
+            path.chmod(0o600)
+            path.write_text(networkmanager_keyfile(credential))
+            self.runner.emit(f"Saved Wi-Fi network {credential.ssid!r} for the installed system")
+
+    def _copy_install_log(self) -> None:
+        log_path = getattr(self.runner, "log_path", None)
+        if log_path is None or not Path(log_path).is_file():
+            return
+        destination = self.target_root / "var/log/protogenos-install.log"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(log_path, destination)
+        destination.chmod(0o600)
+
+    # -- initramfs and bootloader -----------------------------------------
+
+    def _configure_initramfs(self, config: InstallConfig) -> None:
+        if not config.encrypt:
+            return
+        path = self.target_root / "etc/mkinitcpio.conf"
+        path.write_text(boot.add_encrypt_hook(path.read_text()))
+        self._chroot("mkinitcpio", "-P")
+
+    def _kernel_cmdline(
+        self, config: InstallConfig, prepared: PreparedStorage, *, include_root: bool = True
+    ) -> str:
+        mkinitcpio = self.target_root / "etc/mkinitcpio.conf"
+        systemd_initramfs = not mkinitcpio.is_file() or boot.uses_systemd_initramfs(
+            mkinitcpio.read_text()
+        )
+        return boot.kernel_cmdline(
+            root_uuid=prepared.root_uuid or "DRY-RUN-UUID",
+            filesystem=config.filesystem,
+            luks_uuid=(prepared.luks_uuid or "DRY-RUN-LUKS-UUID") if config.encrypt else "",
+            systemd_initramfs=systemd_initramfs,
+            zram=config.swap == "zram",
+            include_root=include_root,
+        )
+
+    def _install_bootloader(
+        self, plan: InstallPlan, config: InstallConfig, prepared: PreparedStorage
+    ) -> None:
+        if config.bootloader == "systemd-boot":
+            self._install_systemd_boot(plan, config, prepared)
+        elif config.bootloader == "limine":
+            self._install_limine(plan, config, prepared)
+        else:
+            self._install_grub(config, prepared)
+
+    def _install_grub(self, config: InstallConfig, prepared: PreparedStorage) -> None:
+        path = self.target_root / "etc/default/grub"
+        content = path.read_text()
+        content = boot.set_shell_variable(content, "GRUB_DISTRIBUTOR", "protogenOS")
+        extra = self._kernel_cmdline(config, prepared, include_root=False)
+        if extra:
+            content = boot.set_shell_variable(content, "GRUB_CMDLINE_LINUX", extra)
+        if config.disk_layout != "erase":
+            # Find Windows or other installed systems for dual boot.
+            content = boot.set_shell_variable(content, "GRUB_DISABLE_OS_PROBER", "false")
+        path.write_text(content)
+
+        if config.firmware == "uefi":
+            nvram = self.runner.run(
+                [
+                    "arch-chroot",
+                    str(self.target_root),
+                    "grub-install",
+                    "--target=x86_64-efi",
+                    "--efi-directory=/boot",
+                    "--bootloader-id=protogenOS",
+                ],
+                check=False,
             )
-        self._chroot("systemctl", "enable", "NetworkManager.service", "sddm.service")
+            if nvram.returncode != 0:
+                self._warn("could not register a UEFI boot entry; relying on the fallback path")
+            # The removable path boots even when firmware forgets NVRAM entries.
+            self._chroot(
+                "grub-install",
+                "--target=x86_64-efi",
+                "--efi-directory=/boot",
+                "--bootloader-id=protogenOS",
+                "--removable",
+            )
+        else:
+            self._chroot("grub-install", "--target=i386-pc", config.disk)
+        self._chroot("grub-mkconfig", "-o", "/boot/grub/grub.cfg")
+
+    def _has_fallback_initramfs(self, kernel: str) -> bool:
+        return (self.target_root / f"boot/initramfs-{kernel}-fallback.img").is_file()
+
+    def _install_systemd_boot(
+        self, plan: InstallPlan, config: InstallConfig, prepared: PreparedStorage
+    ) -> None:
+        installed = self.runner.run(
+            ["arch-chroot", str(self.target_root), "bootctl", "install", "--esp-path=/boot"],
+            check=False,
+        )
+        if installed.returncode != 0:
+            self._warn("could not register a UEFI boot entry; relying on the fallback path")
+            self._chroot("bootctl", "install", "--esp-path=/boot", "--no-variables")
+        kernel = self.kernel_package(plan)
+        cmdline = self._kernel_cmdline(config, prepared)
+        self._write_target("boot/loader/loader.conf", boot.systemd_boot_loader_conf())
+        self._write_target("boot/loader/entries/protogenos.conf", boot.systemd_boot_entry(kernel, cmdline))
+        if self._has_fallback_initramfs(kernel):
+            self._write_target(
+                "boot/loader/entries/protogenos-fallback.conf",
+                boot.systemd_boot_entry(kernel, cmdline, fallback=True),
+            )
+        self._chroot("systemctl", "enable", "systemd-boot-update.service")
+
+    def _install_limine(
+        self, plan: InstallPlan, config: InstallConfig, prepared: PreparedStorage
+    ) -> None:
+        for directory in ("boot/EFI/limine", "boot/EFI/BOOT"):
+            (self.target_root / directory).mkdir(parents=True, exist_ok=True)
+        self._chroot("cp", "/usr/share/limine/BOOTX64.EFI", "/boot/EFI/limine/BOOTX64.EFI")
+        self._chroot("cp", "/usr/share/limine/BOOTX64.EFI", "/boot/EFI/BOOT/BOOTX64.EFI")
+        kernel = self.kernel_package(plan)
+        self._write_target(
+            "boot/limine.conf",
+            boot.limine_conf(
+                kernel,
+                self._kernel_cmdline(config, prepared),
+                fallback=self._has_fallback_initramfs(kernel),
+            ),
+        )
+        self._write_target("etc/pacman.d/hooks/99-limine.hook", boot.LIMINE_PACMAN_HOOK)
+        if prepared.esp_number is None:
+            self._warn("could not register a UEFI boot entry; relying on the fallback path")
+            return
+        registered = self.runner.run(
+            [
+                "arch-chroot",
+                str(self.target_root),
+                "efibootmgr",
+                "--create",
+                "--disk",
+                config.disk,
+                "--part",
+                str(prepared.esp_number),
+                "--label",
+                "protogenOS",
+                "--loader",
+                "\\EFI\\limine\\BOOTX64.EFI",
+                "--unicode",
+            ],
+            check=False,
+        )
+        if registered.returncode != 0:
+            self._warn("could not register a UEFI boot entry; relying on the fallback path")
 
     def _enable_locale(self, locale: str) -> None:
         path = self.target_root / "etc/locale.gen"
@@ -419,73 +1017,135 @@ class InstallerBackend:
             "etc/motd", "Welcome to protogenOS — furry-powered and Arch-based.\n"
         )
 
-    def _set_grub_branding(self) -> None:
-        path = self.target_root / "etc/default/grub"
-        content = path.read_text()
-        assignment = 'GRUB_DISTRIBUTOR="protogenOS"'
-        if re.search(r"^GRUB_DISTRIBUTOR=.*$", content, re.MULTILINE):
-            content = re.sub(
-                r"^GRUB_DISTRIBUTOR=.*$", assignment, content, flags=re.MULTILINE
+    def _apply_desktop_theming(self, plan: InstallPlan) -> None:
+        icon_selected = "papirus" in plan.selections.get("icon-theme", ())
+        theme_selected = "sweet" in plan.selections.get("global-theme", ())
+        sddm_selected = "eucalyptus-drop" in plan.selections.get("sddm-theme", ())
+
+        look_and_feel = (
+            "com.github.vinceliuice.sweet-dark" if theme_selected else "org.kde.breezedark.desktop"
+        )
+        icon_theme = "Papirus-Dark" if icon_selected else "breeze-dark"
+
+        kdeglobals_lines = [
+            "[KDE]",
+            f"LookAndFeel={look_and_feel}",
+            "widgetStyle=Breeze",
+            "",
+            "[General]",
+            "ColorScheme=BreezeDark",
+            "",
+            "[Icons]",
+            f"Theme={icon_theme}",
+            "",
+        ]
+        content = "\n".join(kdeglobals_lines).rstrip() + "\n"
+        self._write_target("etc/skel/.config/kdeglobals", content)
+        self._write_target("etc/xdg/kdeglobals", content)
+
+        # kdeglobals' LookAndFeel key is only a record of the last-applied
+        # package; Plasma never auto-applies it on its own. Force a real
+        # first-login apply (dark plasma theme, colors, splash, decoration)
+        # via a self-removing autostart entry.
+        self._write_target(
+            "usr/local/bin/protogenos-apply-theme",
+            "#!/bin/sh\n"
+            f"plasma-apply-lookandfeel -a {shlex.quote(look_and_feel)}\n"
+            'rm -f "$HOME/.config/autostart/protogenos-apply-theme.desktop"\n',
+        )
+        (self.target_root / "usr/local/bin/protogenos-apply-theme").chmod(0o755)
+        self._write_target(
+            "etc/skel/.config/autostart/protogenos-apply-theme.desktop",
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Exec=/usr/local/bin/protogenos-apply-theme\n"
+            "X-KDE-autostart-phase=1\n"
+            "NoDisplay=true\n"
+            "Name=protogenOS theme setup\n",
+        )
+
+        if sddm_selected:
+            self._write_target(
+                "etc/sddm.conf.d/10-protogenos-theme.conf",
+                "[Theme]\nCurrent=eucalyptus-drop\n",
             )
-        else:
-            content += f"\n{assignment}\n"
-        path.write_text(content)
 
     def _install_aur_packages(self, plan: InstallPlan, config: InstallConfig) -> None:
+        """Build AUR packages with yay (resolves AUR dependencies).
+
+        Failures are reported as warnings rather than aborting: the base
+        system and bootloader are already in place at this point.
+        """
         if not plan.aur_packages:
             return
+        (self.target_root / "etc/pacman.conf").chmod(0o644)
+
         temporary_sudoers = self.target_root / "etc/sudoers.d/99-protogenos-aur"
+        temporary_sudoers.parent.mkdir(parents=True, exist_ok=True)
         temporary_sudoers.write_text(
             f"{config.username} ALL=(ALL:ALL) NOPASSWD: ALL\n"
         )
         temporary_sudoers.chmod(0o440)
+        failed: list[str] = []
         try:
+            helper_ready = self._try_as_user(
+                config, f"{self._makepkg_script(AUR_HELPER)} && {AUR_HELPER} --version"
+            )
+            if not helper_ready:
+                self._warn(f"could not build the {AUR_HELPER} AUR helper; building packages directly")
+            packages = " ".join(shlex.quote(package) for package in plan.aur_packages)
+            if helper_ready and self._try_as_user(config, f"{AUR_HELPER_INSTALL} {packages}"):
+                return
+            # Retry one at a time so one broken PKGBUILD doesn't take the
+            # rest down with it, and so the warning names the culprits.
             for package in plan.aur_packages:
-                build_path = f"/tmp/protogenos-aur-{package}"
-                self.runner.run(
-                    [
-                        "arch-chroot",
-                        str(self.target_root),
-                        "runuser",
-                        "--user",
-                        config.username,
-                        "--",
-                        "git",
-                        "clone",
-                        "--depth",
-                        "1",
-                        f"https://aur.archlinux.org/{package}.git",
-                        build_path,
-                    ]
+                script = (
+                    f"{AUR_HELPER_INSTALL} {shlex.quote(package)}"
+                    if helper_ready
+                    else self._makepkg_script(package)
                 )
-                self.runner.run(
-                    [
-                        "arch-chroot",
-                        str(self.target_root),
-                        "runuser",
-                        "--user",
-                        config.username,
-                        "--",
-                        "/bin/bash",
-                        "-lc",
-                        f"cd {shlex.quote(build_path)} && makepkg -si --noconfirm --needed",
-                    ]
-                )
+                if not self._try_as_user(config, script):
+                    failed.append(package)
         finally:
             temporary_sudoers.unlink(missing_ok=True)
-
-    def _install_bootloader(self, config: InstallConfig) -> None:
-        if config.firmware == "uefi":
-            self._chroot(
-                "grub-install",
-                "--target=x86_64-efi",
-                "--efi-directory=/boot/efi",
-                "--bootloader-id=protogenOS",
-                "--removable",
+        if failed:
+            self._warn(
+                "these AUR packages failed to build and were skipped: "
+                + ", ".join(failed)
+                + " (see /var/log/protogenos-install.log)"
             )
-        else:
-            self._chroot("grub-install", "--target=i386-pc", config.disk)
-        self._chroot("grub-mkconfig", "-o", "/boot/grub/grub.cfg")
+
+    @staticmethod
+    def _makepkg_script(package: str) -> str:
+        build_path = f"/tmp/protogenos-aur-{package}"
+        clone_url = f"https://aur.archlinux.org/{package}.git"
+        return (
+            f"rm -rf {shlex.quote(build_path)} && "
+            f"git clone --depth 1 {shlex.quote(clone_url)} {shlex.quote(build_path)} && "
+            f"cd {shlex.quote(build_path)} && makepkg -si --noconfirm --needed"
+        )
+
+    def _try_as_user(self, config: InstallConfig, script: str) -> bool:
+        try:
+            self._run_as_user(config, script)
+        except subprocess.CalledProcessError:
+            return False
+        return True
+
+    def _run_as_user(self, config: InstallConfig, script: str) -> None:
+        self.runner.run(
+            [
+                "arch-chroot",
+                str(self.target_root),
+                "runuser",
+                "--user",
+                config.username,
+                "--",
+                "/bin/bash",
+                "-lc",
+                script,
+            ]
+        )
 
     def _chroot(self, *args: str, input_text: str | None = None) -> None:
         self.runner.run(

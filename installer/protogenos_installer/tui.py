@@ -12,8 +12,8 @@ from __future__ import annotations
 import curses
 import os
 import shutil
+import time
 from dataclasses import dataclass
-from pathlib import Path
 
 from .backend import (
     HOSTNAME_PATTERN,
@@ -23,11 +23,19 @@ from .backend import (
     DiskInfo,
     InstallConfig,
     InstallError,
+    UserAccount,
     format_size,
+    detect_firmware,
     list_install_disks,
+    list_timezones,
+    search_timezones,
 )
 from .branding import INSTALLER_BANNER, INSTALLER_TAGLINE
+from .keyboard import console_keymap, list_layouts
+from .mirrors import COUNTRY_PATTERN
+from .storage import GIB, MIN_ROOT_BYTES, DiskLayout, read_disk_layout
 from .models import InstallPlan, OptionGroup, PackageChoice
+from .network import IwdClient, NetworkError, WifiNetwork, is_online
 from .profiles import PERSONAS, ProfileRepository
 
 _PAIR_HEADER = 1
@@ -76,6 +84,14 @@ def _run_wizard(
     stdscr.keypad(True)
     _init_colors()
 
+    dry_run = getattr(args, "dry_run", False)
+    keyboard = _select_keyboard(stdscr, apply=not dry_run)
+    if keyboard is None:
+        return WizardResult(cancelled=True)
+
+    if not dry_run and not _ensure_network(stdscr):
+        return WizardResult(cancelled=True)
+
     persona = args.persona
     if persona is None:
         persona = _select_persona(stdscr)
@@ -105,12 +121,12 @@ def _run_wizard(
     ):
         return WizardResult(plan=plan)
 
-    runner = CommandRunner()
-    disk = _select_disk(stdscr, runner)
+    runner = CommandRunner(quiet=True)
+    disk = _select_disk(stdscr, runner, dry_run=getattr(args, "dry_run", False))
     if disk is None:
         return WizardResult(plan=plan)
 
-    config = _collect_install_config(stdscr, disk)
+    config = _collect_install_config(stdscr, disk, runner, keyboard, dry_run=dry_run)
     if config is None:
         return WizardResult(plan=plan)
 
@@ -278,6 +294,91 @@ def _run_list(
                 return "quit", None
 
 
+def _show_status(stdscr, subtitle: str, text: str) -> None:
+    first = _draw_header(stdscr, subtitle)
+    _safe_addstr(stdscr, first, 2, text, curses.color_pair(_PAIR_HINT))
+    stdscr.refresh()
+
+
+def _ensure_network(stdscr, client: IwdClient | None = None, online_check=is_online) -> bool:
+    """Block until the live session is online, offering Wi-Fi setup via iwd."""
+    client = client or IwdClient()
+    subtitle = "Internet connection — packages are downloaded during installation"
+    _show_status(stdscr, subtitle, "Checking internet connection...")
+    if online_check():
+        return True
+
+    networks: tuple[WifiNetwork, ...] = ()
+    device: str | None = None
+    error = ""
+    while True:
+        devices = client.devices()
+        if device not in devices:
+            device = devices[0] if devices else None
+            networks = ()
+        if device and not networks:
+            _show_status(stdscr, subtitle, f"Scanning for Wi-Fi networks on {device}...")
+            try:
+                networks = client.scan(device)
+            except NetworkError as scan_error:
+                error = str(scan_error)
+
+        rows = [
+            Row(
+                label=network.ssid,
+                detail=f"{network.signal} dBm, {network.security}"
+                + (", connected" if network.connected else ""),
+                detail_pair=_PAIR_HINT,
+            )
+            for network in networks
+        ]
+        rescan_index = len(rows)
+        rows.append(Row(label="[ Scan again / check connection ]"))
+        if device is None:
+            hint = "No Wi-Fi adapter found. Plug in Ethernet or USB tethering, then check again."
+        else:
+            hint = f"Not online. Pick a Wi-Fi network ({device}), or plug in Ethernet."
+        footer = f"{error or hint}   Enter select   Esc quit"
+        action, payload = _run_list(stdscr, subtitle, rows, multi=False, footer=footer)
+        if action == "quit":
+            return False
+        error = ""
+        if payload == rescan_index:
+            _show_status(stdscr, subtitle, "Checking internet connection...")
+            if online_check():
+                return True
+            networks = ()
+            continue
+
+        network = networks[payload]
+        passphrase = None
+        if network.security == "psk" and not network.known:
+            passphrase = _text_input(
+                stdscr,
+                f"Wi-Fi passphrase for {network.ssid}",
+                "Passphrase:",
+                "",
+                lambda value: (8 <= len(value) <= 63, "Passphrases are 8 to 63 characters."),
+                secret=True,
+            )
+            if passphrase is None:
+                return False
+        _show_status(stdscr, subtitle, f"Connecting to {network.ssid}...")
+        try:
+            assert device is not None
+            client.connect(device, network.ssid, passphrase)
+        except NetworkError as connect_error:
+            error = str(connect_error)
+            continue
+        _show_status(stdscr, subtitle, "Connected. Waiting for an internet connection...")
+        for _ in range(10):
+            if online_check():
+                return True
+            time.sleep(1)
+        error = f"Joined {network.ssid} but the internet is still unreachable."
+        networks = ()
+
+
 def _select_persona(stdscr) -> str | None:
     rows = [
         Row(label=persona.title(), detail=_PERSONA_BLURBS.get(persona, ""), detail_pair=_PAIR_HINT)
@@ -334,8 +435,8 @@ def _describe_disk(disk: DiskInfo) -> str:
     return f"{disk.path} — {disk.model}, {format_size(disk.size)}{removable}"
 
 
-def _select_disk(stdscr, runner: CommandRunner) -> DiskInfo | None:
-    if os.geteuid() != 0:
+def _select_disk(stdscr, runner: CommandRunner, *, dry_run: bool = False) -> DiskInfo | None:
+    if not dry_run and os.geteuid() != 0:
         raise InstallError("disk installation must run as root")
 
     while True:
@@ -346,8 +447,8 @@ def _select_disk(stdscr, runner: CommandRunner) -> DiskInfo | None:
         rows = [
             Row(
                 label=_describe_disk(disk),
-                detail=("has existing partitions — will be erased" if disk.partitioned else "empty, no partitions — safe to use"),
-                detail_pair=(_PAIR_DANGER if disk.partitioned else _PAIR_GOOD),
+                detail=("has existing partitions" if disk.partitioned else "empty, no partitions"),
+                detail_pair=(_PAIR_HINT if disk.partitioned else _PAIR_GOOD),
             )
             for disk in disks
         ]
@@ -374,27 +475,7 @@ def _select_disk(stdscr, runner: CommandRunner) -> DiskInfo | None:
             curses.curs_set(0)
             continue
 
-        disk = disks[payload]
-        if disk.partitioned:
-            confirmed = _confirm(
-                stdscr,
-                "Confirm disk selection",
-                f"!!! WARNING !!!\n{disk.path} contains existing partitions and data.\n"
-                "Continuing WILL PERMANENTLY ERASE everything on this disk.",
-                danger=True,
-                default=False,
-            )
-        else:
-            confirmed = _confirm(
-                stdscr,
-                "Confirm disk selection",
-                f"{disk.path} appears empty — no partitions detected.\n"
-                "It will still be formatted before install.",
-                danger=False,
-                default=True,
-            )
-        if confirmed:
-            return disk
+        return disks[payload]
 
 
 def _text_input(
@@ -441,6 +522,71 @@ def _text_input(
             buffer.append(chr(key))
 
 
+def _select_timezone(stdscr, zones: tuple[str, ...], default: str = "UTC") -> str | None:
+    query = ""
+    cursor = zones.index(default) if default in zones else 0
+
+    while True:
+        matches = search_timezones(zones, query) if query else zones
+        count = len(matches)
+        cursor = max(0, min(cursor, count - 1)) if count else 0
+
+        height, width = stdscr.getmaxyx()
+        first = _draw_header(stdscr, "Timezone — type to search (e.g. AST, atlantic, tokyo)")
+        _safe_addstr(
+            stdscr, first, 2, f"Search: {query}", curses.color_pair(_PAIR_CURSOR) | curses.A_BOLD
+        )
+        list_top = first + 2
+        visible = max(1, height - list_top - 3)
+        top = max(0, min(cursor - visible // 2, max(0, count - visible)))
+
+        for row_index in range(top, min(count, top + visible)):
+            y = list_top + (row_index - top)
+            text = matches[row_index]
+            if row_index == cursor:
+                pad = max(0, width - 2 - len(text))
+                _safe_addstr(stdscr, y, 2, text + " " * pad, curses.color_pair(_PAIR_CURSOR) | curses.A_BOLD)
+            else:
+                _safe_addstr(stdscr, y, 2, text)
+
+        if count == 0:
+            _safe_addstr(stdscr, list_top, 2, "(no matches)", curses.color_pair(_PAIR_DANGER) | curses.A_BOLD)
+        elif count > visible:
+            _safe_addstr(stdscr, list_top + visible, 2, f"({cursor + 1}/{count})", curses.A_DIM)
+
+        _safe_addstr(
+            stdscr,
+            height - 2,
+            2,
+            "Type to search   ↑/↓ move   Enter select   Esc quit",
+            curses.color_pair(_PAIR_HINT),
+        )
+        curses.curs_set(1)
+        stdscr.move(first, min(width - 1, 2 + len("Search: ") + len(query)))
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        if key == curses.KEY_UP:
+            cursor -= 1
+        elif key == curses.KEY_DOWN:
+            cursor += 1
+        elif key in (curses.KEY_ENTER, 10, 13):
+            if count:
+                curses.curs_set(0)
+                return matches[cursor]
+        elif key in (curses.KEY_BACKSPACE, 127, 8):
+            if query:
+                query = query[:-1]
+                cursor = 0
+        elif key == 27:
+            if _confirm_quit(stdscr):
+                curses.curs_set(0)
+                return None
+        elif 32 <= key <= 126:
+            query += chr(key)
+            cursor = 0
+
+
 def _collect_password(stdscr, username: str) -> str | None:
     def _non_empty(value: str) -> tuple[bool, str]:
         return (bool(value), "Password cannot be empty.")
@@ -458,8 +604,192 @@ def _collect_password(stdscr, username: str) -> str | None:
         return password
 
 
-def _collect_install_config(stdscr, disk: DiskInfo) -> InstallConfig | None:
-    firmware = "uefi" if Path("/sys/firmware/efi").is_dir() else "bios"
+def _select_keyboard(stdscr, *, apply: bool) -> tuple[str, str] | None:
+    layouts = list_layouts()
+    rows = [Row(label=layout.description, detail=layout.code, detail_pair=_PAIR_HINT) for layout in layouts]
+    default = next((index for index, layout in enumerate(layouts) if layout.code == "us"), 0)
+    action, index = _run_list(stdscr, "Keyboard layout", rows, multi=False, cursor=default)
+    if action == "quit":
+        return None
+    layout = layouts[index]
+    variant = ""
+    if layout.variants:
+        variant_rows = [Row(label="Default")] + [Row(label=item.description) for item in layout.variants]
+        action, choice = _run_list(stdscr, f"{layout.description} — variant", variant_rows, multi=False)
+        if action == "quit":
+            return None
+        variant = "" if choice == 0 else layout.variants[choice - 1].code
+    if apply:
+        # Apply right away so passphrases typed later match the boot prompt.
+        CommandRunner(quiet=True).run(["loadkeys", console_keymap(layout.code, variant)], capture_output=True, check=False)
+    return layout.code, variant
+
+
+def _describe_partition(part) -> str:
+    details = ", ".join(item for item in (part.fstype or "unformatted", part.label) if item)
+    return f"{part.path} — {format_size(part.size)} ({details})"
+
+
+def _select_disk_layout(
+    stdscr, disk: DiskInfo, layout: DiskLayout, firmware: str
+) -> tuple[str, str | None, str | None, bool] | None:
+    """Return (layout, root partition, boot partition, format boot)."""
+    uefi = firmware == "uefi"
+    largest = layout.largest_free.size if layout.largest_free else 0
+    free_ok = uefi and layout.table == "gpt" and largest >= MIN_ROOT_BYTES + GIB
+    candidates_ok = uefi and len(layout.partitions) >= 2
+    options = [("erase", Row(label="Erase the entire disk", detail="deletes all data", detail_pair=_PAIR_DANGER))]
+    if free_ok:
+        options.append(
+            ("free-space", Row(label="Install alongside other systems", detail=f"{format_size(largest)} free", detail_pair=_PAIR_GOOD))
+        )
+    if candidates_ok:
+        options.append(("partitions", Row(label="Use existing partitions", detail="pick root and EFI partitions", detail_pair=_PAIR_HINT)))
+    action, index = _run_list(stdscr, f"Installation type for {disk.path}", [row for _, row in options], multi=False)
+    if action == "quit":
+        return None
+    kind = options[index][0]
+    if kind == "erase":
+        if not _confirm(
+            stdscr,
+            "Confirm disk selection",
+            f"!!! WARNING !!!\nEverything on {disk.path} will be PERMANENTLY ERASED.",
+            danger=True,
+            default=False,
+        ):
+            return None
+        return kind, None, None, False
+    if kind == "free-space":
+        return kind, None, None, False
+
+    roots = [part for part in layout.partitions if part.size >= MIN_ROOT_BYTES and not part.mountpoints]
+    if not roots:
+        _show_message(stdscr, "No unmounted partition of at least 16 GiB was found.", danger=True)
+        return None
+    action, index = _run_list(stdscr, "Root partition (will be FORMATTED)", [Row(label=_describe_partition(part)) for part in roots], multi=False)
+    if action == "quit":
+        return None
+    root = roots[index].path
+    boots = [part for part in layout.partitions if part.path != root and not part.mountpoints]
+    action, index = _run_list(stdscr, "EFI system partition (mounted at /boot)", [Row(label=_describe_partition(part)) for part in boots], multi=False)
+    if action == "quit":
+        return None
+    boot = boots[index]
+    format_boot = boot.fstype != "vfat" or _confirm(
+        stdscr,
+        "EFI system partition",
+        f"Format {boot.path}?\nThis removes other systems' bootloaders stored on it.",
+        danger=True,
+        default=False,
+    )
+    return kind, root, boot.path, format_boot
+
+
+def _collect_storage(stdscr, firmware: str, disk_layout: str) -> tuple[str, bool, str | None, str, str] | None:
+    """Return (filesystem, encrypt, passphrase, swap, bootloader)."""
+    filesystems = [
+        ("btrfs", "subvolumes + zstd compression [recommended]"),
+        ("ext4", "classic and battle-tested"),
+        ("xfs", "fast for large files"),
+        ("f2fs", "designed for flash storage"),
+    ]
+    action, index = _run_list(
+        stdscr,
+        "Root filesystem",
+        [Row(label=name, detail=detail, detail_pair=_PAIR_HINT) for name, detail in filesystems],
+        multi=False,
+    )
+    if action == "quit":
+        return None
+    filesystem = filesystems[index][0]
+
+    passphrase = None
+    encrypt = _confirm(
+        stdscr,
+        "Disk encryption",
+        "Encrypt the system with LUKS2?\nA passphrase will be required at every boot.",
+        default=False,
+    )
+    if encrypt:
+        def _valid(value: str) -> tuple[bool, str]:
+            ok = len(value) >= 8 and all(32 <= ord(character) <= 126 for character in value)
+            return ok, "Use at least 8 plain ASCII characters."
+
+        while True:
+            passphrase = _text_input(stdscr, "Encryption passphrase", "Passphrase:", "", _valid, secret=True)
+            if passphrase is None:
+                return None
+            again = _text_input(stdscr, "Encryption passphrase", "Re-enter passphrase:", "", _valid, secret=True)
+            if again is None:
+                return None
+            if again == passphrase:
+                break
+            _show_message(stdscr, "Passphrases did not match.", danger=True)
+
+    swap = "zram" if _confirm(stdscr, "Swap", "Enable compressed swap in RAM (zram)?", default=True) else "none"
+
+    bootloader = "grub"
+    if firmware == "uefi":
+        loaders = [
+            ("grub", "detects other systems for dual boot" if disk_layout != "erase" else "works everywhere"),
+            ("systemd-boot", "minimal and fast"),
+            ("limine", "modern and lightweight"),
+        ]
+        action, index = _run_list(
+            stdscr,
+            "Bootloader",
+            [Row(label=name, detail=detail, detail_pair=_PAIR_HINT) for name, detail in loaders],
+            multi=False,
+        )
+        if action == "quit":
+            return None
+        bootloader = loaders[index][0]
+    return filesystem, encrypt, passphrase, swap, bootloader
+
+
+def _collect_additional_users(stdscr, taken: set[str]) -> tuple[UserAccount, ...] | None:
+    users: list[UserAccount] = []
+    while _confirm(stdscr, "Additional users", "Create another user account?", default=False):
+        name = _text_input(
+            stdscr,
+            "Additional user",
+            "User name:",
+            "",
+            lambda value: (
+                bool(USERNAME_PATTERN.fullmatch(value)) and value not in taken,
+                "Use a new lowercase name (letters, numbers, _ or -).",
+            ),
+        )
+        if name is None:
+            return None
+        password = _collect_password(stdscr, name)
+        if password is None:
+            return None
+        sudo = _confirm(stdscr, "Additional user", f"Grant {name} sudo access?", default=False)
+        users.append(UserAccount(name, password, sudo))
+        taken.add(name)
+    return tuple(users)
+
+
+def _collect_install_config(
+    stdscr,
+    disk: DiskInfo,
+    runner: CommandRunner,
+    keyboard: tuple[str, str] = ("us", ""),
+    *,
+    dry_run: bool = False,
+) -> InstallConfig | None:
+    firmware = detect_firmware()
+    # Reading the partition table is read-only, so dry runs show real options.
+    layout = read_disk_layout(runner, disk.path)
+    layout_choice = _select_disk_layout(stdscr, disk, layout, firmware)
+    if layout_choice is None:
+        return None
+    disk_layout, root_partition, boot_partition, format_boot = layout_choice
+    storage = _collect_storage(stdscr, firmware, disk_layout)
+    if storage is None:
+        return None
+    filesystem, encrypt, passphrase, swap, bootloader = storage
 
     hostname = _text_input(
         stdscr,
@@ -487,23 +817,6 @@ def _collect_install_config(stdscr, disk: DiskInfo) -> InstallConfig | None:
     if username is None:
         return None
 
-    locale = _text_input(
-        stdscr,
-        "System locale",
-        "Locale:",
-        "en_US.UTF-8",
-        lambda value: (
-            bool(LOCALE_PATTERN.fullmatch(value)),
-            "Use a UTF-8 locale such as en_US.UTF-8.",
-        ),
-    )
-    if locale is None:
-        return None
-
-    timezone = _text_input(stdscr, "Timezone", "Timezone:", "UTC", lambda value: (True, ""))
-    if timezone is None:
-        return None
-
     password = _collect_password(stdscr, username)
     if password is None:
         return None
@@ -524,6 +837,44 @@ def _collect_install_config(stdscr, disk: DiskInfo) -> InstallConfig | None:
         if root_password is None:
             return None
 
+    additional_users = _collect_additional_users(stdscr, {username, "root"})
+    if additional_users is None:
+        return None
+
+    locale = _text_input(
+        stdscr,
+        "System locale",
+        "Locale:",
+        "en_US.UTF-8",
+        lambda value: (
+            bool(LOCALE_PATTERN.fullmatch(value)),
+            "Use a UTF-8 locale such as en_US.UTF-8.",
+        ),
+    )
+    if locale is None:
+        return None
+
+    timezone = _select_timezone(stdscr, list_timezones())
+    if timezone is None:
+        return None
+
+    mirror_country = _text_input(
+        stdscr,
+        "Package mirrors",
+        "Country for mirrors (e.g. Germany; leave empty for automatic):",
+        "",
+        lambda value: (not value or bool(COUNTRY_PATTERN.fullmatch(value)), "Use a country name such as Germany."),
+    )
+    if mirror_country is None:
+        return None
+
+    kernel_headers = _confirm(
+        stdscr,
+        "Kernel headers",
+        "Install kernel headers?\nNeeded for DKMS modules such as VirtualBox or NVIDIA drivers.",
+        default=False,
+    )
+
     config = InstallConfig(
         disk=disk.path,
         firmware=firmware,
@@ -534,10 +885,25 @@ def _collect_install_config(stdscr, disk: DiskInfo) -> InstallConfig | None:
         locale=locale,
         grant_sudo=grant_sudo,
         root_password=root_password,
+        filesystem=filesystem,
+        disk_partitioned=disk.partitioned,
+        disk_layout=disk_layout,
+        root_partition=root_partition,
+        boot_partition=boot_partition,
+        format_boot=format_boot,
+        encrypt=encrypt,
+        encryption_passphrase=passphrase,
+        bootloader=bootloader,
+        swap=swap,
+        keyboard_layout=keyboard[0],
+        keyboard_variant=keyboard[1],
+        mirror_country=mirror_country,
+        kernel_headers=kernel_headers,
+        additional_users=additional_users,
     )
     try:
         config.validate()
     except InstallError as error:
         _show_message(stdscr, str(error), danger=True)
-        return _collect_install_config(stdscr, disk)
+        return _collect_install_config(stdscr, disk, runner, keyboard, dry_run=dry_run)
     return config

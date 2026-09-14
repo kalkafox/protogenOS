@@ -19,11 +19,18 @@ from .backend import (
     InstallConfig,
     InstallError,
     InstallerBackend,
+    UserAccount,
     format_size,
+    detect_firmware,
     list_install_disks,
 )
 from .branding import INSTALLER_BANNER, INSTALLER_TAGLINE
+from .config_io import ConfigFileError, export_config, load_documents, read_json, write_json
+from .keyboard import LAYOUT_PATTERN, VARIANT_PATTERN, console_keymap
+from .mirrors import COUNTRY_PATTERN
 from .models import OptionGroup
+from .network import is_online
+from .storage import GIB, MIN_ROOT_BYTES, read_disk_layout
 from .profiles import PERSONAS, ProfileError, ProfileRepository
 
 
@@ -138,7 +145,7 @@ def _choose_disk(runner: CommandRunner) -> DiskInfo | None:
         print("\nSelect the target disk:")
         for index, disk in enumerate(disks, 1):
             if disk.partitioned:
-                status = _colorize("has existing partitions — will be erased", _RED)
+                status = _colorize("has existing partitions", _YELLOW)
             else:
                 status = _colorize("empty, no partitions — safe to use", _GREEN)
             print(f"  {index}. {_describe_disk(disk)} [{status}]")
@@ -163,20 +170,7 @@ def _choose_disk(runner: CommandRunner) -> DiskInfo | None:
             continue
 
         disk = disks[int(response) - 1]
-        if disk.partitioned:
-            print(
-                _colorize(
-                    f"\n!!! WARNING: {disk.path} contains existing partitions and data. "
-                    "Continuing WILL PERMANENTLY ERASE everything on it. !!!",
-                    _BOLD,
-                    _RED,
-                )
-            )
-        else:
-            print(_colorize(f"\n{disk.path} appears empty — no partitions detected.", _GREEN))
-        confirmation = input(
-            f"Use {disk.path}? It will be formatted and ALL data on it will be lost. [y/N] "
-        ).strip().lower()
+        confirmation = input(f"Use {disk.path}? You choose how it is partitioned next. [y/N] ").strip().lower()
         if confirmation in {"y", "yes"}:
             return disk
         print("Returning to disk selection.")
@@ -194,16 +188,64 @@ def _prompt_password(label: str) -> str:
             return password
 
 
-def _choose_install_config() -> InstallConfig | None:
-    if os.geteuid() != 0:
+def _choose(prompt: str, options: Sequence[str], default: str) -> str:
+    while True:
+        response = input(f"{prompt} ({'/'.join(options)}) [{default}]: ").strip().lower() or default
+        if response in options:
+            return response
+        print(f"Enter one of: {', '.join(options)}.")
+
+
+def _yes(prompt: str, default: bool = False) -> bool:
+    hint = "Y/n" if default else "y/N"
+    response = input(f"{prompt} [{hint}] ").strip().lower()
+    return default if not response else response in {"y", "yes"}
+
+
+def _choose_install_config(*, dry_run: bool = False) -> InstallConfig | None:
+    if not dry_run and os.geteuid() != 0:
         raise InstallError("disk installation must run as root")
     runner = CommandRunner()
     disk = _choose_disk(runner)
     if disk is None:
         return None
 
-    firmware = "uefi" if Path("/sys/firmware/efi").is_dir() else "bios"
+    firmware = detect_firmware()
     print(f"Detected boot mode: {firmware.upper()}")
+
+    layouts = ["erase"]
+    root_partition = boot_partition = None
+    format_boot = False
+    if firmware == "uefi":
+        layout = read_disk_layout(runner, disk.path)
+        largest = layout.largest_free.size if layout.largest_free else 0
+        if layout.table == "gpt" and largest >= MIN_ROOT_BYTES + GIB:
+            layouts.append("free-space")
+            print(f"  free-space: install alongside existing partitions ({format_size(largest)} unallocated)")
+        if len(layout.partitions) >= 2:
+            layouts.append("partitions")
+            print("  partitions: format an existing root partition and use an EFI partition for /boot")
+            for part in layout.partitions:
+                print(f"    {part.path}  {format_size(part.size)}  {part.fstype or '-'}  {part.label}")
+    print("  erase: " + _colorize("delete everything on the disk", _RED))
+    disk_layout = _choose("Installation type", layouts, "erase")
+    if disk_layout == "partitions":
+        root_partition = input("Root partition to FORMAT (e.g. /dev/sda3): ").strip()
+        boot_partition = input("EFI system partition for /boot (e.g. /dev/sda1): ").strip()
+        format_boot = _yes(f"Format {boot_partition}? (removes other bootloaders on it)")
+
+    filesystem = _choose("Root filesystem", ["btrfs", "ext4", "xfs", "f2fs"], "btrfs")
+    encrypt = _yes("Encrypt the system with LUKS2?")
+    passphrase = _prompt_password("disk encryption") if encrypt else None
+    swap = "zram" if _yes("Enable compressed swap in RAM (zram)?", True) else "none"
+    bootloader = (
+        _choose("Bootloader", ["grub", "systemd-boot", "limine"], "grub") if firmware == "uefi" else "grub"
+    )
+    keyboard_layout = _prompt_matching("Keyboard layout (XKB, e.g. us, de, fr)", "us", LAYOUT_PATTERN, "Use a layout code such as us or de.")
+    keyboard_variant = _prompt_matching("Keyboard variant (empty for default)", "", VARIANT_PATTERN, "Use a variant code such as nodeadkeys.")
+    if not dry_run:
+        runner.run(["loadkeys", console_keymap(keyboard_layout, keyboard_variant)], capture_output=True, check=False)
+
     hostname = _prompt_matching(
         "Hostname",
         "protogenos",
@@ -223,16 +265,22 @@ def _choose_install_config() -> InstallConfig | None:
         "Use a UTF-8 locale such as en_US.UTF-8.",
     )
     timezone = input("Timezone [UTC]: ").strip() or "UTC"
+    mirror_country = _prompt_matching(
+        "Mirror country (empty for automatic)", "", re.compile(rf"^$|{COUNTRY_PATTERN.pattern}"), "Use a country name such as Germany."
+    )
     password = _prompt_password(username)
 
-    grant_sudo = input(f"Grant {username} sudo (administrator) access? [Y/n] ").strip().lower() not in {
-        "n",
-        "no",
-    }
+    grant_sudo = _yes(f"Grant {username} sudo (administrator) access?", True)
     root_password = None
     if not grant_sudo:
         print("Root will stay unlocked with its own password since this user won't have sudo.")
         root_password = _prompt_password("root")
+
+    additional_users: list[UserAccount] = []
+    while _yes("Create another user account?"):
+        name = _prompt_matching("User name", "", USERNAME_PATTERN, "Use lowercase letters, numbers, _ or -.")
+        additional_users.append(UserAccount(name, _prompt_password(name), _yes(f"Grant {name} sudo access?")))
+    kernel_headers = _yes("Install kernel headers (for DKMS modules)?")
 
     config = InstallConfig(
         disk=disk.path,
@@ -244,9 +292,36 @@ def _choose_install_config() -> InstallConfig | None:
         locale=locale,
         grant_sudo=grant_sudo,
         root_password=root_password,
+        filesystem=filesystem,
+        disk_partitioned=disk.partitioned,
+        disk_layout=disk_layout,
+        root_partition=root_partition,
+        boot_partition=boot_partition,
+        format_boot=format_boot,
+        encrypt=encrypt,
+        encryption_passphrase=passphrase,
+        bootloader=bootloader,
+        swap=swap,
+        keyboard_layout=keyboard_layout,
+        keyboard_variant=keyboard_variant,
+        mirror_country=mirror_country,
+        kernel_headers=kernel_headers,
+        additional_users=tuple(additional_users),
     )
     config.validate()
     return config
+
+
+def _wait_for_network() -> bool:
+    print("\nChecking internet connection...")
+    while not is_online():
+        print("No internet connection; packages are downloaded during installation.")
+        print("Plug in Ethernet, or join Wi-Fi from another console (Alt+F2) with:")
+        print("  iwctl station wlan0 connect <network name>")
+        response = input("Press Enter to check again, or type q to quit: ").strip().lower()
+        if response in {"q", "quit"}:
+            return False
+    return True
 
 
 def _tui_available() -> bool:
@@ -271,25 +346,75 @@ def _write_plan(output: Path, plan) -> None:
     print(f"\nPlan written to {output}")
 
 
-def _finalize_install(plan, config: InstallConfig) -> int:
+def confirmation_phrase(config: InstallConfig) -> str:
+    if config.disk_layout == "partitions":
+        return f"FORMAT {config.root_partition}"
+    if config.disk_layout == "free-space":
+        return f"INSTALL {config.disk}"
+    return f"ERASE {config.disk}"
+
+
+def _describe_target(config: InstallConfig) -> str:
+    if config.disk_layout == "partitions":
+        boot = "formatted" if config.format_boot else "kept"
+        return f"{config.root_partition} (FORMATTED) as root, {config.boot_partition} ({boot}) as /boot"
+    if config.disk_layout == "free-space":
+        return f"new partitions in the free space on {config.disk}"
+    return f"{config.disk} (ENTIRE DISK WILL BE ERASED)"
+
+
+def _offer_chroot_shell(target_root: Path) -> None:
+    if not sys.stdin.isatty():
+        return
+    if not _yes("\nOpen a shell inside the new system before unmounting it?"):
+        return
+    print("Type 'exit' to finish.")
+    CommandRunner().run(["arch-chroot", str(target_root)], check=False)
+
+
+def _finalize_install(
+    plan, config: InstallConfig, *, dry_run: bool = False, unattended: bool = False
+) -> int:
     print("\nInstallation summary")
-    print(f"  Target: {config.disk} (ENTIRE DISK WILL BE ERASED)")
-    print(f"  Boot mode: {config.firmware.upper()}")
+    if dry_run:
+        print("  (DRY RUN: no disks or system files will be touched)")
+    print(f"  Target: {_describe_target(config)}")
+    print(f"  Boot: {config.bootloader} ({config.firmware.upper()})")
+    print(f"  Filesystem: {config.filesystem}{', LUKS2 encrypted' if config.encrypt else ''}")
+    print(f"  Swap: {config.swap}")
+    print(f"  Keyboard: {config.keyboard_layout}{' ' + config.keyboard_variant if config.keyboard_variant else ''}")
     print(f"  Hostname: {config.hostname}")
-    print(f"  User: {config.username}")
+    users = [config.username, *(user.username for user in config.additional_users)]
+    print(f"  Users: {', '.join(users)}")
     print(
         f"  Sudo access: {'yes (root login locked)' if config.grant_sudo else 'no (root has its own password)'}"
     )
     print(f"  Locale/timezone: {config.locale} / {config.timezone}")
-    confirmation = input(f"\nType ERASE {config.disk} to begin: ").strip()
-    if confirmation != f"ERASE {config.disk}":
-        print("Confirmation did not match. No disks were modified.")
-        return 1
+    print(f"  Mirrors: {config.mirror_country or 'automatic'}")
+    if not unattended:
+        phrase = confirmation_phrase(config)
+        confirmation = input(f"\nType {phrase} to begin: ").strip()
+        if confirmation != phrase:
+            print("Confirmation did not match. No disks were modified.")
+            return 1
 
-    InstallerBackend().install(plan, config)
+    backend = InstallerBackend(dry_run=dry_run)
+    if dry_run:
+        print(f"  Dry-run target root: {backend.target_root}")
+    before_unmount = None if (dry_run or unattended) else _offer_chroot_shell
+    backend.install(plan, config, before_unmount=before_unmount)
     print("\nprotogenOS installation completed successfully.")
+    for warning in backend.warnings:
+        print(_colorize(f"warning: {warning}", _YELLOW, _BOLD))
     print("You may reboot after removing the installation media.")
     return 0
+
+
+def _save_config(path: Path | None, plan, config: InstallConfig) -> None:
+    if path is None:
+        return
+    write_json(path, export_config(plan, config))
+    print(f"Configuration saved to {path} (passwords are not included)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -311,7 +436,47 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="use the plain numbered prompts instead of the curses TUI",
     )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="install from a saved configuration (as written by --save-config or "
+        "found at /var/log/protogenos-install.json on an installed system)",
+    )
+    parser.add_argument(
+        "--creds",
+        type=Path,
+        help="JSON file with user_password, root_password, encryption_passphrase, "
+        "and additional_users {name: password} for --config",
+    )
+    parser.add_argument("--save-config", type=Path, help="write the chosen configuration (without passwords) to this file")
+    parser.add_argument(
+        "--unattended",
+        action="store_true",
+        help="with --config: skip the typed confirmation and install immediately (DESTRUCTIVE)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="log installation commands instead of running them, writing to a "
+        "throwaway directory instead of the target disk (no root/disk required)",
+    )
     return parser
+
+
+def _install_from_config(args, repository: ProfileRepository) -> int:
+    credentials = read_json(args.creds) if args.creds else None
+    persona, selections, allow_aur, config = load_documents(read_json(args.config), credentials)
+    plan = repository.resolve(persona, selections)
+    if plan.aur_packages and not (allow_aur or args.allow_aur):
+        raise InstallError(f"AUR packages require allow_aur or --allow-aur: {', '.join(plan.aur_packages)}")
+    config.validate()
+    _print_plan(plan)
+    if args.output:
+        _write_plan(args.output, plan)
+    if not args.dry_run and not args.unattended and not _wait_for_network():
+        print("Installer closed. No disks were modified.")
+        return 0
+    return _finalize_install(plan, config, dry_run=args.dry_run, unattended=args.unattended)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -326,6 +491,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             if group in preset_selections:
                 parser.error(f"--select was provided more than once for {group!r}")
             preset_selections[group] = choices
+
+        if args.unattended and args.config is None:
+            parser.error("--unattended requires --config")
+        if args.config is not None:
+            return _install_from_config(args, repository)
 
         if args.persona is None and args.non_interactive:
             parser.error("--persona is required with --non-interactive")
@@ -360,7 +530,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             if result.config is None:
                 print("Installer closed. No disks were modified.")
                 return 0
-            return _finalize_install(plan, result.config)
+            _save_config(args.save_config, plan, result.config)
+            return _finalize_install(plan, result.config, dry_run=args.dry_run)
 
         persona = args.persona
         if persona is None:
@@ -390,13 +561,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if response not in {"y", "yes"}:
             print("Installer closed. No disks were modified.")
             return 0
+        if not args.dry_run and not _wait_for_network():
+            print("Installer closed. No disks were modified.")
+            return 0
 
-        config = _choose_install_config()
+        config = _choose_install_config(dry_run=args.dry_run)
         if config is None:
             print("Installation cancelled. No disks were modified.")
             return 0
-        return _finalize_install(plan, config)
-    except (OSError, ProfileError, InstallError) as error:
+        _save_config(args.save_config, plan, config)
+        return _finalize_install(plan, config, dry_run=args.dry_run)
+    except (OSError, ProfileError, InstallError, ConfigFileError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:

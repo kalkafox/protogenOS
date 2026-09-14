@@ -1,0 +1,222 @@
+import http.client
+import json
+import tempfile
+import threading
+import unittest
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+from protogenos_installer.webapi import InstallSession, create_server
+
+
+def _request(url: str, *, method: str = "GET", body: dict | None = None):
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    request = urllib.request.Request(url, data=data, method=method)
+    if data is not None:
+        request.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(request) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        return error.code, json.loads(error.read())
+
+
+class WebApiTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.dist_dir = Path(self.temporary.name) / "dist"
+        self.dist_dir.mkdir()
+        (self.dist_dir / "index.html").write_text("<html>installer</html>")
+
+        self.session = InstallSession()
+        self.server = create_server(
+            profiles_dir=Path(__file__).resolve().parents[1] / "profiles",
+            dist_dir=self.dist_dir,
+            session=self.session,
+        )
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        host, port = self.server.server_address[:2]
+        self.base_url = f"http://{host}:{port}"
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+        self.temporary.cleanup()
+
+    def test_personas(self) -> None:
+        status, payload = _request(f"{self.base_url}/api/personas")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["personas"], ["general", "gamer", "developer"])
+
+    def test_system_reports_detected_firmware(self) -> None:
+        status, payload = _request(f"{self.base_url}/api/system")
+        self.assertEqual(status, 200)
+        self.assertIn(payload["firmware"], {"uefi", "bios"})
+        self.assertFalse(payload["dry_run"])
+
+    def test_reboot_refused_while_installing(self) -> None:
+        self.assertTrue(self.session.start())
+        status, payload = _request(f"{self.base_url}/api/system/reboot", method="POST")
+        self.assertEqual(status, 409)
+        self.assertIn("still running", payload["error"])
+
+    def test_session_tracks_steps_and_warnings(self) -> None:
+        session = InstallSession()
+        session.start()
+        session.append_log("[protogenos] step 3/6: Installing packages")
+        session.append_log("==> WARNING: mkinitcpio noise is not an installer warning")
+        session.append_log("[protogenos] warning: something was skipped")
+        snapshot = session.snapshot(0)
+        self.assertEqual(snapshot["step"], {"index": 3, "total": 6, "title": "Installing packages"})
+        self.assertEqual(snapshot["warnings"], ["something was skipped"])
+
+    def test_keyboard_choice_is_validated_and_remembered(self) -> None:
+        status, payload = _request(f"{self.base_url}/api/keyboard")
+        self.assertEqual((status, payload["applied"]), (200, False))
+        status, payload = _request(
+            f"{self.base_url}/api/keyboard", method="POST", body={"layout": "../x"}
+        )
+        self.assertEqual(status, 400)
+
+    def test_keyboard_state_file_restores_layout_after_kiosk_restart(self) -> None:
+        state = Path(self.temporary.name) / "state" / "keyboard"
+        state.parent.mkdir()
+        state.write_text("de\nnodeadkeys\n")
+        server = create_server(
+            profiles_dir=Path(__file__).resolve().parents[1] / "profiles",
+            dist_dir=self.dist_dir,
+            keyboard_state=state,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            host, port = server.server_address[:2]
+            status, payload = _request(f"http://{host}:{port}/api/keyboard")
+            self.assertEqual(payload, {"layout": "de", "variant": "nodeadkeys", "applied": True})
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_options_requires_persona(self) -> None:
+        status, payload = _request(f"{self.base_url}/api/options")
+        self.assertEqual(status, 400)
+        self.assertIn("persona", payload["error"])
+
+    def test_options_for_persona(self) -> None:
+        status, payload = _request(f"{self.base_url}/api/options?persona=general")
+        self.assertEqual(status, 200)
+        self.assertTrue(any(group["name"] == "kernel" for group in payload["groups"]))
+
+    def test_resolve_plan(self) -> None:
+        status, payload = _request(
+            f"{self.base_url}/api/plan/resolve",
+            method="POST",
+            body={"persona": "general", "selections": {}},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["persona"], "general")
+        self.assertIn("base", payload["packages"])
+
+    def test_resolve_plan_invalid_persona(self) -> None:
+        status, payload = _request(
+            f"{self.base_url}/api/plan/resolve",
+            method="POST",
+            body={"persona": "nonexistent", "selections": {}},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("error", payload)
+
+    def test_config_validate_rejects_bad_hostname(self) -> None:
+        status, payload = _request(
+            f"{self.base_url}/api/config/validate",
+            method="POST",
+            body={
+                "disk": "/dev/sda",
+                "firmware": "uefi",
+                "hostname": "bad hostname",
+                "username": "fox",
+                "user_password": "hunter2",
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["valid"])
+
+    def test_static_serves_index_for_unknown_paths(self) -> None:
+        with urllib.request.urlopen(f"{self.base_url}/some/spa/route") as response:
+            self.assertEqual(response.status, 200)
+            self.assertIn(b"installer", response.read())
+
+    def test_static_rejects_path_traversal(self) -> None:
+        host, port = self.server.server_address[:2]
+        connection = http.client.HTTPConnection(host, port)
+        try:
+            connection.request("GET", "/../../../../etc/passwd")
+            response = connection.getresponse()
+            response.read()
+            self.assertEqual(response.status, 403)
+        finally:
+            connection.close()
+
+
+class InstallLifecycleTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.dist_dir = Path(self.temporary.name) / "dist"
+        self.dist_dir.mkdir()
+        (self.dist_dir / "index.html").write_text("<html>installer</html>")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_double_start_conflicts(self) -> None:
+        session = InstallSession()
+        self.assertTrue(session.start())
+        self.assertFalse(session.start())
+
+    def test_aur_gate_blocks_start_without_confirmation(self) -> None:
+        session = InstallSession()
+        server = create_server(
+            profiles_dir=Path(__file__).resolve().parents[1] / "profiles",
+            dist_dir=self.dist_dir,
+            session=session,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host, port = server.server_address[:2]
+        base_url = f"http://{host}:{port}"
+        try:
+            status, payload = _request(
+                f"{base_url}/api/install/start",
+                method="POST",
+                body={
+                    "plan": {
+                        "persona": "gamer",
+                        "packages": ["base"],
+                        "selections": {},
+                        "aur_packages": ["some-aur-package"],
+                        "multilib_required": False,
+                    },
+                    "config": {
+                        "disk": "/dev/sda",
+                        "firmware": "uefi",
+                        "hostname": "proto-box",
+                        "username": "fox",
+                        "user_password": "hunter2",
+                    },
+                    "aur_confirmed": False,
+                },
+            )
+            self.assertEqual(status, 400)
+            self.assertIn("aur_confirmed", payload["error"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+
+if __name__ == "__main__":
+    unittest.main()
