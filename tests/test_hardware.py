@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from protogenos_installer.hardware import detect_hardware
+from protogenos_installer.hardware import EFI_GLOBAL_GUID, detect_features, detect_hardware
 
 
 class HardwareDetectionTests(unittest.TestCase):
@@ -18,11 +18,13 @@ class HardwareDetectionTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def _pci_device(self, name: str, device_class: str, vendor: str) -> None:
+    def _pci_device(self, name: str, device_class: str, vendor: str, device_id: str | None = None) -> None:
         device = self.pci / name
         device.mkdir()
         (device / "class").write_text(f"{device_class}\n")
         (device / "vendor").write_text(f"{vendor}\n")
+        if device_id is not None:
+            (device / "device").write_text(f"{device_id}\n")
 
     def _detect(self, **kwargs):
         return detect_hardware(
@@ -66,6 +68,72 @@ class HardwareDetectionTests(unittest.TestCase):
         self.assertIsNone(profile.microcode)
         self.assertIn("virtualbox-guest-utils", profile.packages)
         self.assertEqual(profile.services, ("vboxservice.service",))
+
+    def test_nvidia_generation_decides_open_driver_support(self) -> None:
+        self.cpuinfo.write_text("")
+        self._pci_device("0000:01:00.0", "0x030000", "0x10de", "0x1c82")  # GTX 1050 Ti (Pascal)
+        self.assertIs(self._detect().nvidia_open_supported, False)
+        self._pci_device("0000:02:00.0", "0x030000", "0x10de", "0x2484")  # RTX 3070 (Ampere)
+        self.assertIs(self._detect().nvidia_open_supported, True)
+
+    def test_no_nvidia_gpu_leaves_open_driver_support_unset(self) -> None:
+        self.cpuinfo.write_text("")
+        self._pci_device("0000:03:00.0", "0x030000", "0x1002", "0x73bf")
+        self.assertIsNone(self._detect().nvidia_open_supported)
+
+
+class FeatureDetectionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.tpm = self.root / "tpm"
+        self.usb = self.root / "usb"
+        self.efivars = self.root / "efivars"
+        self.hwdb = self.root / "fingerprint.hwdb"
+        self.usb.mkdir()
+        self.hwdb.write_text("# comment\nusb:v06CBp00BD*\n ID_AUTOSUSPEND=1\n")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _detect(self):
+        return detect_features(tpm_root=self.tpm, usb_root=self.usb, hwdb=self.hwdb, efivars=self.efivars)
+
+    def _efi_flag(self, name: str, value: int) -> None:
+        self.efivars.mkdir(exist_ok=True)
+        (self.efivars / f"{name}-{EFI_GLOBAL_GUID}").write_bytes(bytes([6, 0, 0, 0, value]))
+
+    def test_bios_machine_without_devices(self) -> None:
+        features = self._detect()
+        self.assertFalse(features.tpm2)
+        self.assertFalse(features.fingerprint_reader)
+        self.assertIsNone(features.secure_boot_setup_mode)
+
+    def test_detects_tpm2_reader_and_setup_mode(self) -> None:
+        (self.tpm / "tpm0").mkdir(parents=True)
+        (self.tpm / "tpm0/tpm_version_major").write_text("2\n")
+        reader = self.usb / "1-4"
+        reader.mkdir()
+        (reader / "idVendor").write_text("06cb\n")
+        (reader / "idProduct").write_text("00bd\n")
+        self._efi_flag("SetupMode", 1)
+        self._efi_flag("SecureBoot", 0)
+        features = self._detect()
+        self.assertTrue(features.tpm2)
+        self.assertTrue(features.fingerprint_reader)
+        self.assertIs(features.secure_boot_setup_mode, True)
+        self.assertIs(features.secure_boot_enabled, False)
+
+    def test_tpm12_and_unknown_usb_devices_are_ignored(self) -> None:
+        (self.tpm / "tpm0").mkdir(parents=True)
+        (self.tpm / "tpm0/tpm_version_major").write_text("1\n")
+        mouse = self.usb / "1-2"
+        mouse.mkdir()
+        (mouse / "idVendor").write_text("046d\n")
+        (mouse / "idProduct").write_text("c077\n")
+        features = self._detect()
+        self.assertFalse(features.tpm2)
+        self.assertFalse(features.fingerprint_reader)
 
 
 if __name__ == "__main__":

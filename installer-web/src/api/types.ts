@@ -30,12 +30,22 @@ export interface HardwareSummary {
   gpus: string[]
   hypervisor: string | null
   packages: string[]
+  // null when there is no NVIDIA GPU; true for Turing and newer.
+  nvidia_open_supported: boolean | null
+}
+
+export interface FeatureSupport {
+  tpm2: boolean
+  fingerprint_reader: boolean
+  secure_boot_setup_mode: boolean | null
+  secure_boot_enabled: boolean | null
 }
 
 export interface SystemInfo {
   firmware: Firmware
   dry_run: boolean
   hardware: HardwareSummary
+  features: FeatureSupport
 }
 
 export interface NetworkStatus {
@@ -145,7 +155,19 @@ export interface SystemChoice {
   additional_users: UserAccount[]
 }
 
-export interface InstallConfig extends DiskChoice, StorageChoice, SystemChoice {
+export type NvidiaDriver = "nouveau" | "nvidia-open"
+
+export interface FeatureChoice {
+  snapshots: boolean
+  flatpak: boolean
+  gaming_tweaks: boolean
+  nvidia_driver: NvidiaDriver
+  fingerprint: boolean
+  tpm2_unlock: boolean
+  secure_boot: boolean
+}
+
+export interface InstallConfig extends DiskChoice, StorageChoice, FeatureChoice, SystemChoice {
   firmware: Firmware
   keyboard_layout: string
   keyboard_variant: string

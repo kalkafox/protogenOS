@@ -3,11 +3,13 @@ import { useCallback, useEffect, useState } from "react"
 import { getKeyboard, getSystem, resolvePlan, startInstall } from "@/api/client"
 import type {
   DiskChoice,
+  FeatureChoice,
   Firmware,
   InstallConfig,
   InstallPlan,
   StorageChoice,
   SystemChoice,
+  SystemInfo,
 } from "@/api/types"
 
 import { LoadingText } from "@/components/ui/spinner"
@@ -19,6 +21,7 @@ import { OptionsScreen } from "@/screens/OptionsScreen"
 import { AurConfirmScreen } from "@/screens/AurConfirmScreen"
 import { DiskScreen } from "@/screens/DiskScreen"
 import { StorageScreen } from "@/screens/StorageScreen"
+import { FeaturesScreen } from "@/screens/FeaturesScreen"
 import { UserConfigScreen } from "@/screens/UserConfigScreen"
 import { ReviewScreen } from "@/screens/ReviewScreen"
 import { ProgressScreen } from "@/screens/ProgressScreen"
@@ -34,6 +37,7 @@ type Step =
   | "aur"
   | "disk"
   | "storage"
+  | "features"
   | "config"
   | "review"
   | "progress"
@@ -43,12 +47,14 @@ type Step =
 function App() {
   const [step, setStep] = useState<Step>("loading")
   const [firmware, setFirmware] = useState<Firmware>("uefi")
+  const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null)
   const [keyboard, setKeyboardChoice] = useState({ layout: "us", variant: "" })
   const [persona, setPersona] = useState("")
   const [selections, setSelections] = useState<Record<string, string[]>>({})
   const [plan, setPlan] = useState<InstallPlan | null>(null)
   const [diskChoice, setDiskChoice] = useState<DiskChoice | null>(null)
   const [storage, setStorage] = useState<StorageChoice | null>(null)
+  const [features, setFeatures] = useState<FeatureChoice | null>(null)
   const [system, setSystem] = useState<SystemChoice | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [warnings, setWarnings] = useState<string[]>([])
@@ -58,6 +64,7 @@ function App() {
     Promise.all([getSystem(), getKeyboard()])
       .then(([info, current]) => {
         setFirmware(info.firmware)
+        setSystemInfo(info)
         setKeyboardChoice({ layout: current.layout, variant: current.variant })
         setStep(current.applied ? "network" : "keyboard")
       })
@@ -76,19 +83,20 @@ function App() {
 
   const buildConfig = useCallback(
     (systemChoice: SystemChoice): InstallConfig => {
-      if (!diskChoice || !storage) throw new Error("disk and storage must be chosen first")
+      if (!diskChoice || !storage || !features) throw new Error("disk, storage, and extras must be chosen first")
       return {
         ...diskChoice,
         ...storage,
+        ...features,
         ...systemChoice,
         firmware,
         keyboard_layout: keyboard.layout,
         keyboard_variant: keyboard.variant,
       }
     },
-    [diskChoice, storage, firmware, keyboard]
+    [diskChoice, storage, features, firmware, keyboard]
   )
-  const config = system && diskChoice && storage ? buildConfig(system) : null
+  const config = system && diskChoice && storage && features ? buildConfig(system) : null
 
   const handleOptionsNext = useCallback(
     async (nextSelections: Record<string, string[]>) => {
@@ -181,6 +189,20 @@ function App() {
           onBack={() => setStep("disk")}
           onNext={(choice) => {
             setStorage(choice)
+            setStep("features")
+          }}
+        />
+      )}
+
+      {step === "features" && storage && systemInfo && (
+        <FeaturesScreen
+          persona={persona}
+          storage={storage}
+          system={systemInfo}
+          value={features}
+          onBack={() => setStep("storage")}
+          onNext={(choice) => {
+            setFeatures(choice)
             setStep("config")
           }}
         />
@@ -190,7 +212,7 @@ function App() {
         <UserConfigScreen
           value={system}
           buildConfig={buildConfig}
-          onBack={() => setStep("storage")}
+          onBack={() => setStep("features")}
           onNext={(choice) => {
             setSystem(choice)
             setStep("review")

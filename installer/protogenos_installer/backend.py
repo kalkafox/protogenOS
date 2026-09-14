@@ -16,7 +16,7 @@ from typing import Callable, Iterable, Sequence
 
 from . import bootloader as boot
 from .config_io import export_config
-from .hardware import HardwareProfile, detect_hardware
+from .hardware import VENDOR_NVIDIA, HardwareProfile, detect_hardware, read_efi_flag
 from .keyboard import (
     LAYOUT_PATTERN,
     VARIANT_PATTERN,
@@ -67,6 +67,40 @@ DISK_LAYOUTS = ("erase", "free-space", "partitions")
 FILESYSTEMS = ("btrfs", "ext4", "xfs", "f2fs")
 BOOTLOADERS = ("grub", "systemd-boot", "limine")
 SWAP_MODES = ("zram", "none")
+NVIDIA_DRIVERS = ("nouveau", "nvidia-open")
+SECURE_BOOT_LOADERS = ("systemd-boot", "limine")
+SNAPPER_ROOT_CONFIG = """SUBVOLUME="/"
+FSTYPE="btrfs"
+QGROUP=""
+SPACE_LIMIT="0.5"
+FREE_LIMIT="0.2"
+ALLOW_USERS=""
+ALLOW_GROUPS="wheel"
+SYNC_ACL="yes"
+BACKGROUND_COMPARISON="yes"
+NUMBER_CREATE="yes"
+NUMBER_CLEANUP="yes"
+NUMBER_MIN_AGE="3600"
+NUMBER_LIMIT="50"
+NUMBER_LIMIT_IMPORTANT="10"
+TIMELINE_CREATE="yes"
+TIMELINE_CLEANUP="yes"
+TIMELINE_MIN_AGE="3600"
+TIMELINE_LIMIT_HOURLY="5"
+TIMELINE_LIMIT_DAILY="7"
+TIMELINE_LIMIT_WEEKLY="0"
+TIMELINE_LIMIT_MONTHLY="0"
+TIMELINE_LIMIT_QUARTERLY="0"
+TIMELINE_LIMIT_YEARLY="0"
+EMPTY_PRE_POST_CLEANUP="yes"
+EMPTY_PRE_POST_MIN_AGE="3600"
+"""
+# Snapshots are read-only; a volatile overlay lets a snapshot boot to a desktop.
+GRUB_BTRFS_CONFIG = 'GRUB_BTRFS_SNAPSHOT_KERNEL_PARAMETERS="systemd.volatile=overlay"\n'
+# Proton games stall on split-lock detection's deliberate slowdown (SteamOS
+# default). vm.max_map_count is already raised by Arch's filesystem package.
+GAMING_SYSCTL_CONF = "kernel.split_lock_mitigate = 0\n"
+FLATHUB_REPO = "https://dl.flathub.org/repo/flathub.flatpakrepo"
 ZRAM_GENERATOR_CONF = """[zram0]
 zram-size = min(ram / 2, 8192)
 compression-algorithm = zstd
@@ -131,6 +165,14 @@ class InstallConfig:
     mirror_country: str = ""
     kernel_headers: bool = False
     additional_users: tuple[UserAccount, ...] = ()
+    # Optional features; front ends pick defaults from detected hardware.
+    snapshots: bool = False
+    flatpak: bool = False
+    gaming_tweaks: bool = False
+    nvidia_driver: str = "nouveau"
+    fingerprint: bool = False
+    tpm2_unlock: bool = False
+    secure_boot: bool = False
 
     def __post_init__(self) -> None:
         # JSON callers (web API, config files) pass users as plain objects.
@@ -147,8 +189,9 @@ class InstallConfig:
             raise InstallError("firmware must be 'uefi' or 'bios'")
         if self.filesystem not in FILESYSTEMS:
             raise InstallError(f"filesystem must be one of: {', '.join(FILESYSTEMS)}")
-        if not isinstance(self.btrfs_subvolumes, bool):
-            raise InstallError("btrfs_subvolumes must be true or false")
+        for name in ("btrfs_subvolumes", "snapshots", "flatpak", "gaming_tweaks", "fingerprint", "tpm2_unlock", "secure_boot"):
+            if not isinstance(getattr(self, name), bool):
+                raise InstallError(f"{name} must be true or false")
         if not HOSTNAME_PATTERN.fullmatch(self.hostname):
             raise InstallError("hostname must contain only letters, numbers, and hyphens")
         if not USERNAME_PATTERN.fullmatch(self.username):
@@ -173,6 +216,7 @@ class InstallConfig:
             raise InstallError(f"bootloader must be one of: {', '.join(BOOTLOADERS)}")
         if self.bootloader != "grub" and self.firmware != "uefi":
             raise InstallError(f"{self.bootloader} requires UEFI; use GRUB for BIOS systems")
+        self._validate_features()
         if self.swap not in SWAP_MODES:
             raise InstallError(f"swap must be one of: {', '.join(SWAP_MODES)}")
         if not LAYOUT_PATTERN.fullmatch(self.keyboard_layout):
@@ -182,6 +226,21 @@ class InstallConfig:
         if self.mirror_country and not COUNTRY_PATTERN.fullmatch(self.mirror_country):
             raise InstallError(f"invalid mirror country: {self.mirror_country!r}")
         self._validate_additional_users()
+
+    def _validate_features(self) -> None:
+        if self.snapshots and not (self.filesystem == "btrfs" and self.btrfs_subvolumes):
+            raise InstallError("snapshots require Btrfs with subvolumes")
+        if self.nvidia_driver not in NVIDIA_DRIVERS:
+            raise InstallError(f"nvidia_driver must be one of: {', '.join(NVIDIA_DRIVERS)}")
+        if self.tpm2_unlock and not self.encrypt:
+            raise InstallError("TPM2 unlock requires disk encryption")
+        if self.secure_boot:
+            if self.firmware != "uefi":
+                raise InstallError("Secure Boot requires UEFI")
+            if self.bootloader not in SECURE_BOOT_LOADERS:
+                raise InstallError(
+                    f"Secure Boot is supported with {' or '.join(SECURE_BOOT_LOADERS)}, not {self.bootloader}"
+                )
 
     def _validate_storage(self) -> None:
         if self.disk_layout not in DISK_LAYOUTS:
@@ -552,6 +611,7 @@ class InstallerBackend:
         dry_run: bool = False,
         online_check: Callable[[], bool] = is_online,
         hardware_detector: Callable[..., HardwareProfile] = detect_hardware,
+        secure_boot_setup_mode: Callable[[], bool] = lambda: bool(read_efi_flag("SetupMode")),
         iwd_storage: Path = IWD_STORAGE,
         keymap_resolver: Callable[[str, str], str] = console_keymap,
     ) -> None:
@@ -571,6 +631,7 @@ class InstallerBackend:
         self.dry_run = dry_run
         self.online_check = online_check
         self.hardware_detector = hardware_detector
+        self.secure_boot_setup_mode = secure_boot_setup_mode
         self.iwd_storage = iwd_storage
         self.keymap_resolver = keymap_resolver
         self.warnings: list[str] = []
@@ -627,12 +688,18 @@ class InstallerBackend:
             # can never leave an unbootable system behind.
             self._configure_initramfs(config)
             self._install_bootloader(plan, config, prepared)
+            if config.secure_boot:
+                self._configure_secure_boot(plan, config)
+            if config.tpm2_unlock:
+                self._enroll_tpm2(config, prepared)
 
             if plan.aur_packages:
                 self._step("Building AUR packages")
                 self._install_aur_packages(plan, config)
 
             self._step("Finishing up")
+            if config.snapshots:
+                self._create_install_snapshot(config)
             for warning in self.warnings:
                 self.runner.emit(f"{WARNING_PREFIX}{warning}")
             self._write_target(
@@ -793,6 +860,7 @@ class InstallerBackend:
             packages.append(f"{self.kernel_package(plan)}-headers")
         if hardware is not None:
             packages.extend(hardware.packages)
+        packages = self._apply_feature_packages(plan, config, hardware, packages)
         if plan.aur_packages:
             packages.extend(("base-devel", "git"))
 
@@ -822,6 +890,44 @@ class InstallerBackend:
             if temporary_path:
                 Path(temporary_path).unlink(missing_ok=True)
         self._write_target("etc/pacman.conf", pacman_text)
+
+    def _apply_feature_packages(
+        self,
+        plan: InstallPlan,
+        config: InstallConfig,
+        hardware: HardwareProfile | None,
+        packages: list[str],
+    ) -> list[str]:
+        if config.snapshots:
+            packages.extend(("snapper", "snap-pac"))
+            if config.bootloader == "grub":
+                packages.extend(("grub-btrfs", "inotify-tools"))
+        if config.flatpak:
+            packages.append("flatpak")
+        if config.gaming_tweaks:
+            packages.append("gamemode")
+            if plan.multilib_required:
+                packages.append("lib32-gamemode")
+        if config.nvidia_driver == "nvidia-open":
+            # The proprietary stack replaces nouveau's Vulkan driver.
+            packages = [package for package in packages if "vulkan-nouveau" not in package]
+            kernel = self.kernel_package(plan)
+            if kernel == "linux":
+                packages.append("nvidia-open")
+            else:
+                packages.extend(("nvidia-open-dkms", f"{kernel}-headers"))
+            packages.append("nvidia-utils")
+            if plan.multilib_required:
+                packages.append("lib32-nvidia-utils")
+            if hardware is not None and any(vendor != VENDOR_NVIDIA for vendor in hardware.gpu_vendors):
+                packages.append("nvidia-prime")
+        if config.fingerprint:
+            packages.append("fprintd")
+        if config.tpm2_unlock:
+            packages.append("tpm2-tss")
+        if config.secure_boot:
+            packages.append("sbctl")
+        return packages
 
     def _write_fstab(self) -> None:
         result = self.runner.run(
@@ -861,7 +967,69 @@ class InstallerBackend:
         self._chroot("hwclock", "--systohc")
         self._chroot("locale-gen")
         self._create_users(config)
+        self._configure_features(plan, config)
         self._enable_services(hardware, desktop=plan.desktop)
+
+    def _configure_features(self, plan: InstallPlan, config: InstallConfig) -> None:
+        if config.snapshots:
+            self._configure_snapshots(config)
+        if config.flatpak:
+            added = self.runner.run(
+                [
+                    "arch-chroot",
+                    str(self.target_root),
+                    "flatpak",
+                    "remote-add",
+                    "--system",
+                    "--if-not-exists",
+                    "flathub",
+                    FLATHUB_REPO,
+                ],
+                check=False,
+            )
+            if added.returncode != 0:
+                self._warn("could not add the Flathub remote; add it later with flatpak remote-add")
+        if config.gaming_tweaks:
+            self._write_target("etc/sysctl.d/80-protogenos-gaming.conf", GAMING_SYSCTL_CONF)
+            for username in (config.username, *(user.username for user in config.additional_users)):
+                self._chroot("usermod", "--append", "--groups", "gamemode", username)
+
+    def _configure_snapshots(self, config: InstallConfig) -> None:
+        # Written directly: `snapper create-config` wants to create .snapshots
+        # itself, but the installer already mounts the @snapshots subvolume there.
+        self._write_target("etc/snapper/configs/root", SNAPPER_ROOT_CONFIG)
+        self._write_target("etc/conf.d/snapper", 'SNAPPER_CONFIGS="root"\n')
+        snapshots = self.target_root / ".snapshots"
+        snapshots.mkdir(exist_ok=True)
+        snapshots.chmod(0o750)
+        timers = ["snapper-timeline.timer", "snapper-cleanup.timer"]
+        if config.bootloader == "grub":
+            self._write_target("etc/default/grub-btrfs/config", GRUB_BTRFS_CONFIG)
+            timers.append("grub-btrfsd.service")
+        self._chroot("systemctl", "enable", *timers)
+
+    def _create_install_snapshot(self, config: InstallConfig) -> None:
+        created = self.runner.run(
+            [
+                "arch-chroot",
+                str(self.target_root),
+                "snapper",
+                "--no-dbus",
+                "-c",
+                "root",
+                "create",
+                "--description",
+                "protogenOS installation",
+                "--userdata",
+                "important=yes",
+            ],
+            check=False,
+        )
+        if created.returncode != 0:
+            self._warn("could not create the initial snapshot")
+        elif config.bootloader == "grub":
+            # Add the new snapshot to GRUB's snapshot submenu right away.
+            self._chroot("grub-mkconfig", "-o", "/boot/grub/grub.cfg")
 
     def _configure_desktop_keyboard(self, config: InstallConfig) -> None:
         layout, variant = config.keyboard_layout, config.keyboard_variant
@@ -930,10 +1098,16 @@ class InstallerBackend:
     # -- initramfs and bootloader -----------------------------------------
 
     def _configure_initramfs(self, config: InstallConfig) -> None:
-        if not config.encrypt:
+        if not config.encrypt and config.nvidia_driver != "nvidia-open":
             return
         path = self.target_root / "etc/mkinitcpio.conf"
-        path.write_text(boot.add_encrypt_hook(path.read_text()))
+        content = path.read_text()
+        if config.encrypt:
+            content = boot.add_encrypt_hook(content)
+        if config.nvidia_driver == "nvidia-open":
+            # kms would pull nouveau into early boot ahead of the NVIDIA module.
+            content = boot.remove_hook(content, "kms")
+        path.write_text(content)
         self._chroot("mkinitcpio", "-P")
 
     def _kernel_cmdline(
@@ -948,6 +1122,7 @@ class InstallerBackend:
             filesystem=config.filesystem,
             btrfs_subvolumes=config.btrfs_subvolumes,
             luks_uuid=(prepared.luks_uuid or "DRY-RUN-LUKS-UUID") if config.encrypt else "",
+            tpm2=config.tpm2_unlock,
             systemd_initramfs=systemd_initramfs,
             zram=config.swap == "zram",
             include_root=include_root,
@@ -962,6 +1137,60 @@ class InstallerBackend:
             self._install_limine(plan, config, prepared)
         else:
             self._install_grub(config, prepared)
+
+    def _configure_secure_boot(self, plan: InstallPlan, config: InstallConfig) -> None:
+        self._chroot("sbctl", "create-keys")
+        kernel = self.kernel_package(plan)
+        if config.bootloader == "systemd-boot":
+            # The .signed copy is what bootctl and systemd-boot-update install.
+            source = "/usr/lib/systemd/boot/efi/systemd-bootx64.efi"
+            self._chroot("sbctl", "sign", "--save", "--output", f"{source}.signed", source)
+            efi_files = ["/boot/EFI/systemd/systemd-bootx64.efi", "/boot/EFI/BOOT/BOOTX64.EFI"]
+        else:
+            efi_files = ["/boot/EFI/limine/BOOTX64.EFI", "/boot/EFI/BOOT/BOOTX64.EFI"]
+        # --save lets sbctl's pacman hook re-sign these after every update.
+        for path in (*efi_files, f"/boot/vmlinuz-{kernel}"):
+            self._chroot("sbctl", "sign", "--save", path)
+        if not self.secure_boot_setup_mode():
+            self._warn(
+                "Secure Boot keys were created and boot files signed, but the firmware is not in "
+                "Setup Mode; enable Setup Mode, then run 'sudo sbctl enroll-keys --microsoft'"
+            )
+            return
+        enrolled = self.runner.run(
+            ["arch-chroot", str(self.target_root), "sbctl", "enroll-keys", "--microsoft"],
+            check=False,
+        )
+        if enrolled.returncode != 0:
+            self._warn("could not enroll Secure Boot keys; run 'sudo sbctl enroll-keys --microsoft' after booting")
+
+    def _enroll_tpm2(self, config: InstallConfig, prepared: PreparedStorage) -> None:
+        # Bound to PCR 7 (Secure Boot state): changing Secure Boot settings
+        # later falls back to the passphrase until the TPM slot is re-enrolled.
+        mkinitcpio = self.target_root / "etc/mkinitcpio.conf"
+        if mkinitcpio.is_file() and not boot.uses_systemd_initramfs(mkinitcpio.read_text()):
+            self._warn("TPM2 unlock needs a systemd-based initramfs; skipping TPM2 enrollment")
+            return
+        enroll = ["systemd-cryptenroll", "--tpm2-device=auto", "--tpm2-pcrs=7"]
+        if self.dry_run:
+            enrolled = self.runner.run([*enroll, prepared.root_partition], check=False)
+        else:
+            # NamedTemporaryFile is created mode 0600.
+            with tempfile.NamedTemporaryFile("w", prefix="protogenos-luks-", delete=True) as key_file:
+                key_file.write(config.encryption_passphrase or "")
+                key_file.flush()
+                enrolled = self.runner.run(
+                    [*enroll, f"--unlock-key-file={key_file.name}", prepared.root_partition],
+                    check=False,
+                )
+        if enrolled.returncode != 0:
+            self._warn("could not enroll the TPM2 chip; the disk will ask for its passphrase at boot")
+        elif config.secure_boot:
+            self._warn(
+                "TPM2 unlock is bound to the current Secure Boot state; after enabling Secure Boot, "
+                "re-enroll with 'sudo systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=auto --tpm2-pcrs=7 "
+                f"{prepared.root_partition}'"
+            )
 
     def _install_grub(self, config: InstallConfig, prepared: PreparedStorage) -> None:
         path = self.target_root / "etc/default/grub"

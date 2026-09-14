@@ -12,6 +12,7 @@ from protogenos_installer.backend import (
     InstallConfig,
     InstallError,
     InstallerBackend,
+    UserAccount,
     detect_firmware,
     enable_multilib,
     list_install_disks,
@@ -603,6 +604,156 @@ class InstallerBackendTests(unittest.TestCase):
         entry = (self.target / "boot/loader/entries/protogenos.conf").read_text()
         self.assertIn("options root=UUID=ROOT-UUID rw", entry)
         self.assertNotIn("rootflags", entry)
+
+    def _pacstrap(self, runner: FakeRunner) -> tuple[str, ...]:
+        return next(command for command in runner.commands if command[0] == "pacstrap")
+
+    def test_snapshots_configure_snapper_and_grub_btrfs(self) -> None:
+        runner = FakeRunner()
+        self._backend(runner).install(self._plan(), self._config(snapshots=True))
+        pacstrap = self._pacstrap(runner)
+        for package in ("snapper", "snap-pac", "grub-btrfs", "inotify-tools"):
+            self.assertIn(package, pacstrap)
+        self.assertIn('SUBVOLUME="/"', (self.target / "etc/snapper/configs/root").read_text())
+        self.assertEqual((self.target / "etc/conf.d/snapper").read_text(), 'SNAPPER_CONFIGS="root"\n')
+        self.assertIn(
+            "systemd.volatile=overlay", (self.target / "etc/default/grub-btrfs/config").read_text()
+        )
+        chroot = self._chroot_commands(runner)
+        self.assertIn(
+            ("systemctl", "enable", "snapper-timeline.timer", "snapper-cleanup.timer", "grub-btrfsd.service"),
+            chroot,
+        )
+        snapshot = next(index for index, command in enumerate(chroot) if command[:2] == ("snapper", "--no-dbus"))
+        self.assertIn(("grub-mkconfig", "-o", "/boot/grub/grub.cfg"), chroot[snapshot:])
+
+    def test_snapshots_without_grub_skip_grub_btrfs(self) -> None:
+        runner = FakeRunner()
+        self._backend(runner).install(self._plan(), self._config(bootloader="limine", snapshots=True))
+        self.assertNotIn("grub-btrfs", self._pacstrap(runner))
+        self.assertFalse((self.target / "etc/default/grub-btrfs/config").exists())
+
+    def test_snapshots_require_btrfs_subvolumes(self) -> None:
+        for overrides in ({"filesystem": "ext4"}, {"btrfs_subvolumes": False}):
+            with self.subTest(overrides=overrides):
+                with self.assertRaisesRegex(InstallError, "snapshots require"):
+                    self._config(snapshots=True, **overrides).validate(self.zoneinfo)
+
+    def test_flatpak_and_gaming_tweaks(self) -> None:
+        runner = FakeRunner()
+        config = self._config(
+            flatpak=True,
+            gaming_tweaks=True,
+            additional_users=(UserAccount("kit", "another good password", False),),
+        )
+        self._backend(runner).install(self._plan(multilib=True), config)
+        pacstrap = self._pacstrap(runner)
+        for package in ("flatpak", "gamemode", "lib32-gamemode"):
+            self.assertIn(package, pacstrap)
+        chroot = self._chroot_commands(runner)
+        self.assertTrue(any(command[:3] == ("flatpak", "remote-add", "--system") for command in chroot))
+        self.assertIn(("usermod", "--append", "--groups", "gamemode", "fox"), chroot)
+        self.assertIn(("usermod", "--append", "--groups", "gamemode", "kit"), chroot)
+        self.assertIn(
+            "split_lock_mitigate = 0",
+            (self.target / "etc/sysctl.d/80-protogenos-gaming.conf").read_text(),
+        )
+
+    def test_nvidia_open_replaces_nouveau_and_drops_kms_hook(self) -> None:
+        runner = FakeRunner()
+        hardware = HardwareProfile(
+            gpu_vendors=("0x8086", "0x10de"),
+            packages=("mesa", "vulkan-intel", "vulkan-nouveau", "lib32-vulkan-nouveau"),
+            nvidia_open_supported=True,
+        )
+        self._backend(runner, hardware).install(
+            self._plan(multilib=True), self._config(nvidia_driver="nvidia-open")
+        )
+        pacstrap = self._pacstrap(runner)
+        for package in ("nvidia-open", "nvidia-utils", "lib32-nvidia-utils", "nvidia-prime", "vulkan-intel"):
+            self.assertIn(package, pacstrap)
+        self.assertFalse(any("vulkan-nouveau" in package for package in pacstrap))
+        hooks = (self.target / "etc/mkinitcpio.conf").read_text()
+        self.assertNotIn(" kms ", hooks)
+        self.assertIn(("mkinitcpio", "-P"), self._chroot_commands(runner))
+
+    def test_nvidia_open_uses_dkms_for_other_kernels(self) -> None:
+        runner = FakeRunner()
+        plan = InstallPlan(
+            persona="general",
+            packages=("base", "linux-zen", "linux-firmware"),
+            selections={"kernel": ("linux-zen",)},
+            aur_packages=(),
+            multilib_required=False,
+        )
+        self._backend(runner).install(plan, self._config(nvidia_driver="nvidia-open"))
+        pacstrap = self._pacstrap(runner)
+        self.assertIn("nvidia-open-dkms", pacstrap)
+        self.assertIn("linux-zen-headers", pacstrap)
+        self.assertNotIn("nvidia-open", pacstrap)
+        self.assertNotIn("nvidia-prime", pacstrap)
+
+    def test_fingerprint_installs_fprintd(self) -> None:
+        runner = FakeRunner()
+        self._backend(runner).install(self._plan(), self._config(fingerprint=True))
+        self.assertIn("fprintd", self._pacstrap(runner))
+
+    def test_tpm2_unlock_enrolls_with_key_file_and_kernel_option(self) -> None:
+        runner = FakeRunner()
+        config = self._config(
+            bootloader="systemd-boot", encrypt=True, encryption_passphrase="unlock-me-please", tpm2_unlock=True
+        )
+        self._backend(runner).install(self._plan(), config)
+        self.assertIn("tpm2-tss", self._pacstrap(runner))
+        enroll = next(command for command in runner.commands if command[0] == "systemd-cryptenroll")
+        self.assertIn("--tpm2-pcrs=7", enroll)
+        self.assertEqual(enroll[-1], "/dev/nvme0n1p2")
+        key_file = next(argument for argument in enroll if argument.startswith("--unlock-key-file="))
+        self.assertFalse(Path(key_file.split("=", 1)[1]).exists())
+        self.assertNotIn("unlock-me-please", " ".join(enroll))
+        entry = (self.target / "boot/loader/entries/protogenos.conf").read_text()
+        self.assertIn("rd.luks.options=LUKS-UUID=tpm2-device=auto", entry)
+
+    def test_tpm2_unlock_requires_encryption(self) -> None:
+        with self.assertRaisesRegex(InstallError, "TPM2 unlock requires"):
+            self._config(tpm2_unlock=True).validate(self.zoneinfo)
+
+    def test_secure_boot_signs_and_enrolls_in_setup_mode(self) -> None:
+        runner = FakeRunner()
+        backend = self._backend(runner)
+        backend.secure_boot_setup_mode = lambda: True
+        backend.install(self._plan(), self._config(bootloader="systemd-boot", secure_boot=True))
+        self.assertIn("sbctl", self._pacstrap(runner))
+        chroot = self._chroot_commands(runner)
+        self.assertIn(("sbctl", "create-keys"), chroot)
+        self.assertIn(
+            (
+                "sbctl", "sign", "--save", "--output",
+                "/usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed",
+                "/usr/lib/systemd/boot/efi/systemd-bootx64.efi",
+            ),
+            chroot,
+        )
+        for path in ("/boot/EFI/BOOT/BOOTX64.EFI", "/boot/vmlinuz-linux"):
+            self.assertIn(("sbctl", "sign", "--save", path), chroot)
+        self.assertIn(("sbctl", "enroll-keys", "--microsoft"), chroot)
+        self.assertEqual(backend.warnings, [])
+
+    def test_secure_boot_outside_setup_mode_warns_instead_of_enrolling(self) -> None:
+        runner = FakeRunner()
+        backend = self._backend(runner)
+        backend.secure_boot_setup_mode = lambda: False
+        backend.install(self._plan(), self._config(bootloader="limine", secure_boot=True))
+        chroot = self._chroot_commands(runner)
+        self.assertIn(("sbctl", "sign", "--save", "/boot/EFI/limine/BOOTX64.EFI"), chroot)
+        self.assertNotIn(("sbctl", "enroll-keys", "--microsoft"), chroot)
+        self.assertTrue(any("Setup Mode" in warning for warning in backend.warnings))
+
+    def test_secure_boot_rejects_grub_and_bios(self) -> None:
+        with self.assertRaisesRegex(InstallError, "Secure Boot is supported with"):
+            self._config(secure_boot=True).validate(self.zoneinfo)
+        with self.assertRaisesRegex(InstallError, "Secure Boot requires UEFI"):
+            self._config("bios", secure_boot=True).validate(self.zoneinfo)
 
     def test_systemd_boot_writes_entries_with_full_cmdline(self) -> None:
         runner = FakeRunner()

@@ -31,6 +31,8 @@ from .backend import (
     search_timezones,
 )
 from .branding import INSTALLER_BANNER, INSTALLER_TAGLINE
+from .features import feature_settings, offered_features
+from .hardware import detect_features, detect_hardware
 from .keyboard import console_keymap, list_layouts
 from .mirrors import COUNTRY_PATTERN
 from .storage import GIB, MIN_ROOT_BYTES, DiskLayout, read_disk_layout
@@ -127,7 +129,7 @@ def _run_wizard(
     if disk is None:
         return WizardResult(plan=plan)
 
-    config = _collect_install_config(stdscr, disk, runner, keyboard, dry_run=dry_run)
+    config = _collect_install_config(stdscr, disk, runner, plan, keyboard, dry_run=dry_run)
     if config is None:
         return WizardResult(plan=plan)
 
@@ -785,6 +787,7 @@ def _collect_install_config(
     stdscr,
     disk: DiskInfo,
     runner: CommandRunner,
+    plan: InstallPlan,
     keyboard: tuple[str, str] = ("us", ""),
     *,
     dry_run: bool = False,
@@ -800,6 +803,26 @@ def _collect_install_config(
     if storage is None:
         return None
     filesystem, btrfs_subvolumes, encrypt, passphrase, swap, bootloader = storage
+    offers = offered_features(
+        plan.persona,
+        filesystem=filesystem,
+        btrfs_subvolumes=btrfs_subvolumes,
+        encrypt=encrypt,
+        firmware=firmware,
+        bootloader=bootloader,
+        hardware=detect_hardware(desktop=plan.desktop),
+        support=detect_features(),
+    )
+    action, checked = _run_list(
+        stdscr,
+        "Extras — choose any",
+        [Row(label=offer.label, detail=offer.detail, detail_pair=_PAIR_HINT) for offer in offers],
+        multi=True,
+        checked={index for index, offer in enumerate(offers) if offer.default},
+    )
+    if action == "quit":
+        return None
+    features = feature_settings(offers[index].key for index in checked)
 
     hostname = _text_input(
         stdscr,
@@ -911,10 +934,11 @@ def _collect_install_config(
         mirror_country=mirror_country,
         kernel_headers=kernel_headers,
         additional_users=additional_users,
+        **features,
     )
     try:
         config.validate()
     except InstallError as error:
         _show_message(stdscr, str(error), danger=True)
-        return _collect_install_config(stdscr, disk, runner, keyboard, dry_run=dry_run)
+        return _collect_install_config(stdscr, disk, runner, plan, keyboard, dry_run=dry_run)
     return config

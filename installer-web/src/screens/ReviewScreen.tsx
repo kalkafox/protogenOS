@@ -12,6 +12,18 @@ import { formatSize } from "@/lib/format"
 
 const BOOTLOADER_NAMES = { grub: "GRUB", "systemd-boot": "systemd-boot", limine: "Limine" }
 
+function describeExtras(config: InstallConfig): string {
+  const extras = [
+    config.snapshots && "snapshots",
+    config.flatpak && "Flatpak",
+    config.gaming_tweaks && "gaming tweaks",
+    config.nvidia_driver === "nvidia-open" && "NVIDIA driver",
+    config.fingerprint && "fingerprint login",
+    config.secure_boot && "Secure Boot",
+  ].filter(Boolean)
+  return extras.length > 0 ? extras.join(", ") : "None"
+}
+
 interface DataWarning {
   title: string
   // Existing partitions that will be destroyed; empty when nothing is lost.
@@ -120,8 +132,12 @@ export function ReviewScreen({
           ? "Btrfs with subvolumes, zstd compression"
           : "Btrfs, flat (no subvolumes), zstd compression",
     ],
-    ["Encryption", config.encrypt ? "LUKS2 (passphrase at boot)" : "None"],
+    [
+      "Encryption",
+      config.encrypt ? `LUKS2 (passphrase at boot${config.tpm2_unlock ? ", TPM unlock" : ""})` : "None",
+    ],
     ["Swap", config.swap === "zram" ? "zram (compressed RAM)" : "None"],
+    ["Extras", describeExtras(config)],
     ["Boot", `${BOOTLOADER_NAMES[config.bootloader]} · ${config.firmware.toUpperCase()}`],
     ["Keyboard", config.keyboard_variant ? `${config.keyboard_layout} (${config.keyboard_variant})` : config.keyboard_layout],
     ["Hostname", config.hostname],

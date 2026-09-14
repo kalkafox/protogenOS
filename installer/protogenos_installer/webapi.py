@@ -29,7 +29,7 @@ from .backend import (
     list_install_disks,
     list_timezones,
 )
-from .hardware import detect_hardware
+from .hardware import detect_features, detect_hardware
 from .keyboard import LAYOUT_PATTERN, VARIANT_PATTERN, console_keymap, list_layouts
 from .mirrors import parse_reflector_countries
 from .storage import StorageError, read_disk_layout
@@ -204,6 +204,7 @@ def make_handler(
                             "firmware": detect_firmware(),
                             "dry_run": dry_run,
                             "hardware": detect_hardware().describe(),
+                            "features": detect_features().describe(),
                         },
                     )
                 elif path == "/api/network" and method == "GET":

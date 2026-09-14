@@ -55,6 +55,18 @@ def add_encrypt_hook(mkinitcpio_conf: str) -> str:
     )
 
 
+def remove_hook(mkinitcpio_conf: str, hook: str) -> str:
+    match = _HOOKS_PATTERN.search(mkinitcpio_conf)
+    if match is None:
+        raise BootConfigError("mkinitcpio.conf has no HOOKS=(...) line")
+    hooks = [name for name in match.group("hooks").split() if name != hook]
+    return (
+        mkinitcpio_conf[: match.start()]
+        + f"HOOKS=({' '.join(hooks)})"
+        + mkinitcpio_conf[match.end() :]
+    )
+
+
 def luks_kernel_parameters(luks_uuid: str, *, systemd_initramfs: bool) -> list[str]:
     if systemd_initramfs:
         return [f"rd.luks.name={luks_uuid}={LUKS_MAPPER}"]
@@ -67,6 +79,7 @@ def kernel_cmdline(
     filesystem: str,
     btrfs_subvolumes: bool = True,
     luks_uuid: str = "",
+    tpm2: bool = False,
     systemd_initramfs: bool = True,
     zram: bool = False,
     include_root: bool = True,
@@ -79,6 +92,8 @@ def kernel_cmdline(
     parameters: list[str] = []
     if luks_uuid:
         parameters += luks_kernel_parameters(luks_uuid, systemd_initramfs=systemd_initramfs)
+        if tpm2 and systemd_initramfs:
+            parameters.append(f"rd.luks.options={luks_uuid}=tpm2-device=auto")
     if include_root:
         if luks_uuid:
             parameters.append(f"root=/dev/mapper/{LUKS_MAPPER}")

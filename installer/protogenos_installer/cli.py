@@ -26,9 +26,11 @@ from .backend import (
 )
 from .branding import INSTALLER_BANNER, INSTALLER_TAGLINE
 from .config_io import ConfigFileError, export_config, load_documents, read_json, write_json
+from .features import feature_settings, offered_features
+from .hardware import detect_features, detect_hardware
 from .keyboard import LAYOUT_PATTERN, VARIANT_PATTERN, console_keymap
 from .mirrors import COUNTRY_PATTERN
-from .models import OptionGroup
+from .models import InstallPlan, OptionGroup
 from .network import is_online
 from .storage import GIB, MIN_ROOT_BYTES, read_disk_layout
 from .profiles import PERSONAS, ProfileError, ProfileRepository
@@ -202,7 +204,7 @@ def _yes(prompt: str, default: bool = False) -> bool:
     return default if not response else response in {"y", "yes"}
 
 
-def _choose_install_config(*, dry_run: bool = False) -> InstallConfig | None:
+def _choose_install_config(plan: InstallPlan, *, dry_run: bool = False) -> InstallConfig | None:
     if not dry_run and os.geteuid() != 0:
         raise InstallError("disk installation must run as root")
     runner = CommandRunner()
@@ -243,6 +245,19 @@ def _choose_install_config(*, dry_run: bool = False) -> InstallConfig | None:
     swap = "zram" if _yes("Enable compressed swap in RAM (zram)?", True) else "none"
     bootloader = (
         _choose("Bootloader", ["grub", "systemd-boot", "limine"], "grub") if firmware == "uefi" else "grub"
+    )
+    offers = offered_features(
+        plan.persona,
+        filesystem=filesystem,
+        btrfs_subvolumes=btrfs_subvolumes,
+        encrypt=encrypt,
+        firmware=firmware,
+        bootloader=bootloader,
+        hardware=detect_hardware(desktop=plan.desktop),
+        support=detect_features(),
+    )
+    features = feature_settings(
+        offer.key for offer in offers if _yes(f"{offer.label} ({offer.detail})?", offer.default)
     )
     keyboard_layout = _prompt_matching("Keyboard layout (XKB, e.g. us, de, fr)", "us", LAYOUT_PATTERN, "Use a layout code such as us or de.")
     keyboard_variant = _prompt_matching("Keyboard variant (empty for default)", "", VARIANT_PATTERN, "Use a variant code such as nodeadkeys.")
@@ -311,6 +326,7 @@ def _choose_install_config(*, dry_run: bool = False) -> InstallConfig | None:
         mirror_country=mirror_country,
         kernel_headers=kernel_headers,
         additional_users=tuple(additional_users),
+        **features,
     )
     config.validate()
     return config
@@ -358,6 +374,23 @@ def confirmation_phrase(config: InstallConfig) -> str:
     return f"ERASE {config.disk}"
 
 
+def _describe_extras(config: InstallConfig) -> str:
+    extras = [
+        label
+        for enabled, label in (
+            (config.snapshots, "snapshots"),
+            (config.flatpak, "Flatpak"),
+            (config.gaming_tweaks, "gaming tweaks"),
+            (config.nvidia_driver == "nvidia-open", "NVIDIA open driver"),
+            (config.fingerprint, "fingerprint login"),
+            (config.tpm2_unlock, "TPM disk unlock"),
+            (config.secure_boot, "Secure Boot"),
+        )
+        if enabled
+    ]
+    return ", ".join(extras) or "none"
+
+
 def _describe_filesystem(config: InstallConfig) -> str:
     if config.filesystem != "btrfs":
         return config.filesystem
@@ -392,6 +425,7 @@ def _finalize_install(
     print(f"  Boot: {config.bootloader} ({config.firmware.upper()})")
     print(f"  Filesystem: {_describe_filesystem(config)}{', LUKS2 encrypted' if config.encrypt else ''}")
     print(f"  Swap: {config.swap}")
+    print(f"  Extras: {_describe_extras(config)}")
     print(f"  Keyboard: {config.keyboard_layout}{' ' + config.keyboard_variant if config.keyboard_variant else ''}")
     print(f"  Hostname: {config.hostname}")
     users = [config.username, *(user.username for user in config.additional_users)]
@@ -575,7 +609,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("Installer closed. No disks were modified.")
             return 0
 
-        config = _choose_install_config(dry_run=args.dry_run)
+        config = _choose_install_config(plan, dry_run=args.dry_run)
         if config is None:
             print("Installation cancelled. No disks were modified.")
             return 0
