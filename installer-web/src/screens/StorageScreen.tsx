@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label"
 
 const DEFAULT_STORAGE: StorageChoice = {
   filesystem: "btrfs",
+  btrfs_subvolumes: true,
   encrypt: false,
   encryption_passphrase: null,
   swap: "zram",
@@ -38,7 +39,7 @@ export function StorageScreen({
   onBack: () => void
   onNext: (choice: StorageChoice) => void
 }) {
-  const [choice, setChoice] = useState<StorageChoice>(value ?? DEFAULT_STORAGE)
+  const [choice, setChoice] = useState<StorageChoice>({ ...DEFAULT_STORAGE, ...value })
   const [confirmation, setConfirmation] = useState(value?.encryption_passphrase ?? "")
   const update = <K extends keyof StorageChoice>(key: K, next: StorageChoice[K]) =>
     setChoice((current) => ({ ...current, [key]: next }))
@@ -69,13 +70,31 @@ export function StorageScreen({
               {
                 value: "btrfs",
                 title: "Btrfs (recommended)",
-                description: "Compressed, with @, @home, @log, @pkg and @snapshots subvolumes ready for snapshots.",
+                description: "Copy-on-write with zstd compression.",
               },
               { value: "ext4", title: "ext4", description: "The classic, battle-tested Linux filesystem." },
               { value: "xfs", title: "XFS", description: "Fast for large files; cannot be shrunk later." },
               { value: "f2fs", title: "F2FS", description: "Designed for flash storage (SSDs, SD cards)." },
             ]}
           />
+          {choice.filesystem === "btrfs" && (
+            <div className="flex items-start gap-2 pt-1">
+              <Checkbox
+                id="btrfs-subvolumes"
+                checked={choice.btrfs_subvolumes}
+                onCheckedChange={(checked) => update("btrfs_subvolumes", checked === true)}
+              />
+              <div className="flex flex-col gap-0.5">
+                <Label htmlFor="btrfs-subvolumes" className="font-normal">
+                  Create subvolumes (@, @home, @log, @pkg, @snapshots)
+                </Label>
+                <p className="text-muted-foreground text-xs">
+                  Recommended. Needed for system snapshots and rollback; turn off for a single flat
+                  volume.
+                </p>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="flex flex-col gap-3 rounded-md border p-3">
@@ -170,6 +189,7 @@ export function StorageScreen({
               onNext({
                 ...choice,
                 encryption_passphrase: choice.encrypt ? passphrase : null,
+                btrfs_subvolumes: choice.filesystem !== "btrfs" || choice.btrfs_subvolumes,
                 bootloader: uefi ? choice.bootloader : "grub",
               })
             }

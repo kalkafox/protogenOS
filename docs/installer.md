@@ -131,8 +131,11 @@ Erase layout partitions:
 | BIOS | 2 MiB BIOS boot, root |
 | BIOS with LUKS or F2FS | 2 MiB BIOS boot, 1 GiB ext4 `/boot`, root |
 
-Filesystems: Btrfs (default; `@`, `@home`, `@log`, `@pkg`, `@snapshots`
-subvolumes, mounted with `compress=zstd:1,noatime`), ext4, XFS, or F2FS.
+Filesystems: Btrfs (default), ext4, XFS, or F2FS. Btrfs is mounted with
+`compress=zstd:1,noatime` and by default gets `@`, `@home`, `@log`, `@pkg`,
+and `@snapshots` subvolumes, with `rootflags=subvol=@` on the kernel command
+line. Turning subvolumes off (`btrfs_subvolumes: false`) installs to the
+top-level volume instead; snapshot rollback needs the subvolume layout.
 Encryption is optional LUKS2 on root, opened as `cryptroot`.
 
 ## Bootloader

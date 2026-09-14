@@ -115,6 +115,8 @@ class InstallConfig:
     grant_sudo: bool = True
     root_password: str | None = field(default=None, repr=False)
     filesystem: str = "btrfs"
+    # Btrfs only: False formats a single flat volume without @ subvolumes.
+    btrfs_subvolumes: bool = True
     disk_partitioned: bool = True
     disk_layout: str = "erase"
     root_partition: str | None = None
@@ -145,6 +147,8 @@ class InstallConfig:
             raise InstallError("firmware must be 'uefi' or 'bios'")
         if self.filesystem not in FILESYSTEMS:
             raise InstallError(f"filesystem must be one of: {', '.join(FILESYSTEMS)}")
+        if not isinstance(self.btrfs_subvolumes, bool):
+            raise InstallError("btrfs_subvolumes must be true or false")
         if not HOSTNAME_PATTERN.fullmatch(self.hostname):
             raise InstallError("hostname must contain only letters, numbers, and hyphens")
         if not USERNAME_PATTERN.fullmatch(self.username):
@@ -942,6 +946,7 @@ class InstallerBackend:
         return boot.kernel_cmdline(
             root_uuid=prepared.root_uuid or "DRY-RUN-UUID",
             filesystem=config.filesystem,
+            btrfs_subvolumes=config.btrfs_subvolumes,
             luks_uuid=(prepared.luks_uuid or "DRY-RUN-LUKS-UUID") if config.encrypt else "",
             systemd_initramfs=systemd_initramfs,
             zram=config.swap == "zram",

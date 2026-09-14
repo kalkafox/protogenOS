@@ -125,6 +125,7 @@ export interface DiskChoice {
 
 export interface StorageChoice {
   filesystem: Filesystem
+  btrfs_subvolumes: boolean
   encrypt: boolean
   encryption_passphrase: string | null
   swap: "zram" | "none"

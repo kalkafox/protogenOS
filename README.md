@@ -101,8 +101,9 @@ Installation options:
   the largest unallocated space (a new EFI partition is created; existing
   partitions are untouched), or format an existing root partition and reuse
   an EFI system partition. The last two require UEFI and GPT.
-- **Filesystems:** Btrfs (default; `@`, `@home`, `@log`, `@pkg`, and
-  `@snapshots` subvolumes with zstd compression), ext4, XFS, or F2FS.
+- **Filesystems:** Btrfs (default; zstd compression and `@`, `@home`, `@log`,
+  `@pkg`, and `@snapshots` subvolumes, or a flat volume without subvolumes),
+  ext4, XFS, or F2FS.
 - **Encryption:** optional LUKS2 root with an initramfs unlock prompt. On BIOS
   systems an unencrypted ext4 `/boot` partition is added automatically.
 - **Bootloader:** GRUB (UEFI or BIOS, with os-prober when installing alongside

@@ -112,7 +112,14 @@ export function ReviewScreen({
   const rows: [string, string][] = [
     ["Persona", plan.persona],
     ["Target", describeTarget(config)],
-    ["Filesystem", config.filesystem === "btrfs" ? "Btrfs with subvolumes, zstd compression" : config.filesystem],
+    [
+      "Filesystem",
+      config.filesystem !== "btrfs"
+        ? config.filesystem
+        : config.btrfs_subvolumes
+          ? "Btrfs with subvolumes, zstd compression"
+          : "Btrfs, flat (no subvolumes), zstd compression",
+    ],
     ["Encryption", config.encrypt ? "LUKS2 (passphrase at boot)" : "None"],
     ["Swap", config.swap === "zram" ? "zram (compressed RAM)" : "None"],
     ["Boot", `${BOOTLOADER_NAMES[config.bootloader]} · ${config.firmware.toUpperCase()}`],

@@ -65,6 +65,7 @@ def kernel_cmdline(
     *,
     root_uuid: str,
     filesystem: str,
+    btrfs_subvolumes: bool = True,
     luks_uuid: str = "",
     systemd_initramfs: bool = True,
     zram: bool = False,
@@ -83,7 +84,7 @@ def kernel_cmdline(
             parameters.append(f"root=/dev/mapper/{LUKS_MAPPER}")
         else:
             parameters.append(f"root=UUID={root_uuid}")
-        if filesystem == "btrfs":
+        if filesystem == "btrfs" and btrfs_subvolumes:
             parameters.append("rootflags=subvol=@")
         parameters.append("rw")
     if zram:

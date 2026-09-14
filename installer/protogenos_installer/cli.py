@@ -235,6 +235,9 @@ def _choose_install_config(*, dry_run: bool = False) -> InstallConfig | None:
         format_boot = _yes(f"Format {boot_partition}? (removes other bootloaders on it)")
 
     filesystem = _choose("Root filesystem", ["btrfs", "ext4", "xfs", "f2fs"], "btrfs")
+    btrfs_subvolumes = filesystem != "btrfs" or _yes(
+        "Create Btrfs subvolumes (@, @home, @log, @pkg, @snapshots)?", True
+    )
     encrypt = _yes("Encrypt the system with LUKS2?")
     passphrase = _prompt_password("disk encryption") if encrypt else None
     swap = "zram" if _yes("Enable compressed swap in RAM (zram)?", True) else "none"
@@ -293,6 +296,7 @@ def _choose_install_config(*, dry_run: bool = False) -> InstallConfig | None:
         grant_sudo=grant_sudo,
         root_password=root_password,
         filesystem=filesystem,
+        btrfs_subvolumes=btrfs_subvolumes,
         disk_partitioned=disk.partitioned,
         disk_layout=disk_layout,
         root_partition=root_partition,
@@ -354,6 +358,12 @@ def confirmation_phrase(config: InstallConfig) -> str:
     return f"ERASE {config.disk}"
 
 
+def _describe_filesystem(config: InstallConfig) -> str:
+    if config.filesystem != "btrfs":
+        return config.filesystem
+    return "btrfs (subvolumes)" if config.btrfs_subvolumes else "btrfs (flat, no subvolumes)"
+
+
 def _describe_target(config: InstallConfig) -> str:
     if config.disk_layout == "partitions":
         boot = "formatted" if config.format_boot else "kept"
@@ -380,7 +390,7 @@ def _finalize_install(
         print("  (DRY RUN: no disks or system files will be touched)")
     print(f"  Target: {_describe_target(config)}")
     print(f"  Boot: {config.bootloader} ({config.firmware.upper()})")
-    print(f"  Filesystem: {config.filesystem}{', LUKS2 encrypted' if config.encrypt else ''}")
+    print(f"  Filesystem: {_describe_filesystem(config)}{', LUKS2 encrypted' if config.encrypt else ''}")
     print(f"  Swap: {config.swap}")
     print(f"  Keyboard: {config.keyboard_layout}{' ' + config.keyboard_variant if config.keyboard_variant else ''}")
     print(f"  Hostname: {config.hostname}")

@@ -244,7 +244,7 @@ class StorageManager:
             prepared.root_device = self._encrypt(root, config.encryption_passphrase or "")
             prepared.luks_uuid = self._capture(["cryptsetup", "luksUUID", root])
         self._format_root(config.filesystem, prepared.root_device)
-        self._mount_root(config.filesystem, prepared.root_device)
+        self._mount_root(config.filesystem, prepared.root_device, subvolumes=config.btrfs_subvolumes)
         if boot is not None:
             self._prepare_boot(boot, esp=prepared.boot_is_esp, format_boot=format_boot)
         prepared.root_uuid = self._capture(
@@ -396,9 +396,12 @@ class StorageManager:
         self.mount_attempted = True
         self.runner.run([*command, device, str(mount_point)])
 
-    def _mount_root(self, filesystem: str, device: str) -> None:
+    def _mount_root(self, filesystem: str, device: str, *, subvolumes: bool = True) -> None:
         if filesystem != "btrfs":
             self._mount(device, "", filesystem, "noatime")
+            return
+        if not subvolumes:
+            self._mount(device, "", "btrfs", BTRFS_MOUNT_OPTIONS)
             return
         self._mount(device, "", "btrfs")
         for subvolume, _ in BTRFS_SUBVOLUMES:

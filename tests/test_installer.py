@@ -589,6 +589,21 @@ class InstallerBackendTests(unittest.TestCase):
             "/dev/nvme0n1p3",
         )
 
+    def test_flat_btrfs_mounts_top_level_without_subvolumes(self) -> None:
+        runner = FakeRunner()
+        self._backend(runner).install(
+            self._plan(), self._config(bootloader="systemd-boot", btrfs_subvolumes=False)
+        )
+        commands = runner.commands
+        self.assertIn(
+            ("mount", "-t", "btrfs", "-o", "compress=zstd:1,noatime", "/dev/nvme0n1p2", str(self.target)),
+            commands,
+        )
+        self.assertFalse(any(command[:3] == ("btrfs", "subvolume", "create") for command in commands))
+        entry = (self.target / "boot/loader/entries/protogenos.conf").read_text()
+        self.assertIn("options root=UUID=ROOT-UUID rw", entry)
+        self.assertNotIn("rootflags", entry)
+
     def test_systemd_boot_writes_entries_with_full_cmdline(self) -> None:
         runner = FakeRunner()
         plan = InstallPlan(
@@ -761,6 +776,7 @@ class InstallConfigValidationTests(unittest.TestCase):
             ({"encrypt": True, "encryption_passphrase": "short"}, "at least 8"),
             ({"encrypt": True, "encryption_passphrase": "pässphrase-long"}, "printable ASCII"),
             ({"filesystem": "zfs"}, "filesystem must be"),
+            ({"btrfs_subvolumes": "no"}, "btrfs_subvolumes must be"),
             ({"keyboard_layout": "../evil"}, "keyboard layout"),
             ({"additional_users": [{"username": "fox", "password": "x"}]}, "already taken"),
             ({"additional_users": [{"username": "kit", "password": ""}]}, "cannot be empty"),

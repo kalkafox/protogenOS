@@ -686,8 +686,10 @@ def _select_disk_layout(
     return kind, root, boot.path, format_boot
 
 
-def _collect_storage(stdscr, firmware: str, disk_layout: str) -> tuple[str, bool, str | None, str, str] | None:
-    """Return (filesystem, encrypt, passphrase, swap, bootloader)."""
+def _collect_storage(
+    stdscr, firmware: str, disk_layout: str
+) -> tuple[str, bool, bool, str | None, str, str] | None:
+    """Return (filesystem, btrfs_subvolumes, encrypt, passphrase, swap, bootloader)."""
     filesystems = [
         ("btrfs", "subvolumes + zstd compression [recommended]"),
         ("ext4", "classic and battle-tested"),
@@ -703,6 +705,13 @@ def _collect_storage(stdscr, firmware: str, disk_layout: str) -> tuple[str, bool
     if action == "quit":
         return None
     filesystem = filesystems[index][0]
+    btrfs_subvolumes = filesystem != "btrfs" or _confirm(
+        stdscr,
+        "Btrfs subvolumes",
+        "Create @, @home, @log, @pkg and @snapshots subvolumes?\n"
+        "Recommended: needed for system snapshots and rollback.",
+        default=True,
+    )
 
     passphrase = None
     encrypt = _confirm(
@@ -745,7 +754,7 @@ def _collect_storage(stdscr, firmware: str, disk_layout: str) -> tuple[str, bool
         if action == "quit":
             return None
         bootloader = loaders[index][0]
-    return filesystem, encrypt, passphrase, swap, bootloader
+    return filesystem, btrfs_subvolumes, encrypt, passphrase, swap, bootloader
 
 
 def _collect_additional_users(stdscr, taken: set[str]) -> tuple[UserAccount, ...] | None:
@@ -790,7 +799,7 @@ def _collect_install_config(
     storage = _collect_storage(stdscr, firmware, disk_layout)
     if storage is None:
         return None
-    filesystem, encrypt, passphrase, swap, bootloader = storage
+    filesystem, btrfs_subvolumes, encrypt, passphrase, swap, bootloader = storage
 
     hostname = _text_input(
         stdscr,
@@ -887,6 +896,7 @@ def _collect_install_config(
         grant_sudo=grant_sudo,
         root_password=root_password,
         filesystem=filesystem,
+        btrfs_subvolumes=btrfs_subvolumes,
         disk_partitioned=disk.partitioned,
         disk_layout=disk_layout,
         root_partition=root_partition,
