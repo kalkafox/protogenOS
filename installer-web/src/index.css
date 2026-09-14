@@ -86,3 +86,50 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Cyber protogen backdrop: visor LED dot matrix and circuit traces, faded out
+   behind the centered card, with a dim red visor glow along the top. Static
+   so the kiosk stays smooth without GPU acceleration. */
+body::before,
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+}
+
+body::before {
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200' fill='none' stroke='%23d51f3d' stroke-width='1.2' stroke-linejoin='round'%3E%3Cpath d='M0 40H60l20 20h52M200 40h-30l-20-20V0M100 200v-40l20-20v-22M100 0v17M0 120h12M160 200v-15l15-15v-38l10-10h15M160 0v10M24 200v-24l16-16h40'/%3E%3Cg fill='%230a0a0c'%3E%3Ccircle cx='136' cy='60' r='3'/%3E%3Ccircle cx='120' cy='115' r='3'/%3E%3Ccircle cx='100' cy='20' r='3'/%3E%3Ccircle cx='15' cy='120' r='3'/%3E%3Ccircle cx='160' cy='13' r='3'/%3E%3Ccircle cx='83' cy='160' r='3'/%3E%3C/g%3E%3Cg fill='%23ff405c' stroke='none'%3E%3Crect x='36' y='84' width='5' height='5'/%3E%3Crect x='44' y='84' width='5' height='5'/%3E%3Crect x='52' y='84' width='5' height='5' opacity='.45'/%3E%3Crect x='44' y='92' width='5' height='5' opacity='.45'/%3E%3C/g%3E%3C/svg%3E"),
+    radial-gradient(circle, rgb(255 64 92 / 0.16) 1px, transparent 1.5px);
+  background-size: 260px 260px, 14px 14px;
+  opacity: 0.3;
+  mask-image: radial-gradient(ellipse 60% 70% at 50% 50%, transparent 45%, #000 100%);
+}
+
+body::after {
+  background:
+    radial-gradient(ellipse 70% 35% at 50% 0%, rgb(213 31 61 / 0.18), transparent 70%),
+    radial-gradient(ellipse 90% 30% at 50% 100%, rgb(114 20 38 / 0.2), transparent 70%);
+}
+
+@keyframes led-chase {
+  0% {
+    opacity: 1;
+  }
+  35%,
+  100% {
+    opacity: 0.2;
+  }
+}
+
+.led-chase {
+  animation: led-chase 0.8s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .led-chase {
+    animation-duration: 2.4s;
+  }
+}

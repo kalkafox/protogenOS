@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Spinner } from "@/components/ui/spinner"
 import { NativeSelect } from "@/components/ui/select"
 
 const DEFAULT_SYSTEM: SystemChoice = {
@@ -233,8 +234,9 @@ export function UserConfigScreen({
           <Button variant="outline" onClick={onBack}>
             Back
           </Button>
-          <Button disabled={checking} onClick={handleNext}>
-            {checking ? "Checking..." : "Next"}
+          <Button aria-busy={checking} disabled={checking} onClick={handleNext}>
+            {checking && <Spinner />}
+            {checking ? "Checking…" : "Next"}
           </Button>
         </div>
       </CardContent>

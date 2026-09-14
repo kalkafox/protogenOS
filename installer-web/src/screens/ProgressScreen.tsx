@@ -5,6 +5,7 @@ import type { InstallStatus } from "@/api/types"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Spinner } from "@/components/ui/spinner"
 
 export function ProgressScreen({
   onDone,
@@ -65,7 +66,8 @@ export function ProgressScreen({
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         <div className="flex flex-col gap-1.5">
-          <p className="text-sm font-medium">
+          <p role="status" className="flex items-center gap-2 text-sm font-medium">
+            <Spinner className="text-ring" />
             {step ? `Step ${step.index} of ${step.total}: ${step.title}` : "Starting…"}
           </p>
           <Progress value={progressValue} />

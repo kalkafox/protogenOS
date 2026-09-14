@@ -3,6 +3,7 @@ import { useState } from "react"
 import { rebootSystem } from "@/api/client"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Spinner } from "@/components/ui/spinner"
 
 export function DoneScreen({ warnings }: { warnings: string[] }) {
   const [error, setError] = useState<string | null>(null)
@@ -44,7 +45,8 @@ export function DoneScreen({ warnings }: { warnings: string[] }) {
           <Button variant="outline" onClick={() => window.location.reload()}>
             Start another install
           </Button>
-          <Button disabled={rebooting} onClick={handleReboot}>
+          <Button aria-busy={rebooting} disabled={rebooting} onClick={handleReboot}>
+            {rebooting && <Spinner />}
             {rebooting ? "Rebooting…" : "Reboot now"}
           </Button>
         </div>

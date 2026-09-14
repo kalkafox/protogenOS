@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { Label } from "@/components/ui/label"
+import { LoadingText } from "@/components/ui/spinner"
 
 const DESCRIPTIONS: Record<string, string> = {
   general: "Everyday desktop use with a browser and essentials.",
@@ -40,6 +41,7 @@ export function PersonaScreen({
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
         {error && <p className="text-destructive text-sm">{error}</p>}
+        {personas.length === 0 && !error && <LoadingText>Loading personas…</LoadingText>}
         <RadioGroup value={selected} onValueChange={setSelected}>
           {personas.map((persona) => (
             <div key={persona} className="flex items-start gap-3 rounded-md border p-3">

@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+import { LoadingText } from "@/components/ui/spinner"
 
 type Phase = "checking" | "offline" | "online"
 
@@ -95,7 +96,7 @@ export function NetworkScreen({ onNext }: { onNext: () => void }) {
           Packages are downloaded during installation, so an internet connection is required.
         </p>
         {error && <p className="text-destructive text-sm">{error}</p>}
-        {phase === "checking" && <p className="text-sm">Checking connection…</p>}
+        {phase === "checking" && <LoadingText>Checking connection…</LoadingText>}
         {phase === "online" && <p className="text-sm font-medium">Connected to the internet.</p>}
 
         {phase === "offline" && devices.length === 0 && (
@@ -158,7 +159,7 @@ export function NetworkScreen({ onNext }: { onNext: () => void }) {
           </div>
         )}
 
-        {busy && <p className="text-muted-foreground text-sm">{busy}</p>}
+        {busy && <LoadingText>{busy}</LoadingText>}
 
         <div className="flex justify-between">
           <Button variant="outline" disabled={busy !== null} onClick={() => check(false)}>

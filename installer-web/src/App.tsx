@@ -10,6 +10,8 @@ import type {
   SystemChoice,
 } from "@/api/types"
 
+import { LoadingText } from "@/components/ui/spinner"
+
 import { KeyboardScreen } from "@/screens/KeyboardScreen"
 import { NetworkScreen } from "@/screens/NetworkScreen"
 import { PersonaScreen } from "@/screens/PersonaScreen"
@@ -118,7 +120,7 @@ function App() {
     <div className="mx-auto flex min-h-svh max-w-xl flex-col justify-center px-4 py-10">
       <h1 className="mb-6 text-center text-2xl font-semibold">protogenOS Installer</h1>
 
-      {step === "loading" && <p className="text-muted-foreground text-center text-sm">Loading…</p>}
+      {step === "loading" && <LoadingText className="justify-center">Loading…</LoadingText>}
 
       {step === "keyboard" && (
         <KeyboardScreen

@@ -123,9 +123,12 @@ a warning instead of leaving an unbootable system. The command log is kept at
 passwords) at `/var/log/protogenos-install.json`, in both the live session
 and the installed system.
 
-Every install requires typing a confirmation that names what will be
+Text-mode installs require typing a confirmation that names what will be
 destroyed: `ERASE /dev/...`, `INSTALL /dev/...` (free space), or
-`FORMAT /dev/...` (existing partitions). After a text-mode install you can
+`FORMAT /dev/...` (existing partitions). The graphical installer instead names
+the disk model, size, and every partition that will be lost, and requires
+ticking an acknowledgement before its install button unlocks. After a
+text-mode install you can
 open a shell inside the new system before it is unmounted.
 
 From a repository checkout or the booted ISO, run:

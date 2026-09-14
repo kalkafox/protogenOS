@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { NativeSelect } from "@/components/ui/select"
+import { LoadingText } from "@/components/ui/spinner"
 import { formatSize } from "@/lib/format"
 
 const GIB = 1024 ** 3
@@ -30,7 +31,7 @@ export function DiskScreen({
   onBack: () => void
   onNext: (choice: DiskChoice) => void
 }) {
-  const [disks, setDisks] = useState<DiskInfo[]>([])
+  const [disks, setDisks] = useState<DiskInfo[] | null>(null)
   const [disk, setDisk] = useState(value?.disk ?? "")
   const [layout, setLayout] = useState<DiskLayout | null>(null)
   const [kind, setKind] = useState<DiskLayoutKind>(value?.disk_layout ?? "erase")
@@ -42,7 +43,10 @@ export function DiskScreen({
   useEffect(() => {
     getDisks()
       .then((data) => setDisks(data.disks))
-      .catch((err) => setError(String(err)))
+      .catch((err) => {
+        setDisks([])
+        setError(String(err))
+      })
   }, [])
 
   useEffect(() => {
@@ -65,7 +69,7 @@ export function DiskScreen({
     bootPartition !== "" &&
     rootPartition !== bootPartition &&
     (formatBoot || bootInfo?.fstype === "vfat")
-  const selectedDisk = disks.find((item) => item.path === disk)
+  const selectedDisk = disks?.find((item) => item.path === disk)
   const ready =
     selectedDisk !== undefined &&
     layout !== null &&
@@ -90,7 +94,8 @@ export function DiskScreen({
       </CardHeader>
       <CardContent className="flex flex-col gap-5">
         {error && <p className="text-destructive text-sm">{error}</p>}
-        {disks.length === 0 && !error && (
+        {disks === null && <LoadingText>Looking for disks…</LoadingText>}
+        {disks?.length === 0 && !error && (
           <p className="text-muted-foreground text-sm">No eligible disks found.</p>
         )}
         <ChoiceList
@@ -101,7 +106,7 @@ export function DiskScreen({
             setRootPartition("")
             setBootPartition("")
           }}
-          choices={disks.map((item) => ({
+          choices={(disks ?? []).map((item) => ({
             value: item.path,
             title: `${item.path} — ${item.model}, ${formatSize(item.size)}`,
             description: item.partitioned
@@ -112,7 +117,7 @@ export function DiskScreen({
           }))}
         />
 
-        {disk && layout === null && <p className="text-muted-foreground text-sm">Reading partitions…</p>}
+        {disk && layout === null && !error && <LoadingText>Reading partitions…</LoadingText>}
 
         {layout && (
           <div className="flex flex-col gap-2">

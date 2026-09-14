@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { NativeSelect } from "@/components/ui/select"
+import { LoadingText } from "@/components/ui/spinner"
 
 export function KeyboardScreen({
   onNext,
@@ -84,7 +85,9 @@ export function KeyboardScreen({
   if (applying) {
     return (
       <Card>
-        <CardContent className="py-10 text-center text-sm">Applying keyboard layout…</CardContent>
+        <CardContent className="py-10">
+          <LoadingText className="text-foreground justify-center">Applying keyboard layout…</LoadingText>
+        </CardContent>
       </Card>
     )
   }

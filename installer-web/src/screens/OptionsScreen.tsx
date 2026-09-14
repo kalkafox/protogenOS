@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
+import { LoadingText, Spinner } from "@/components/ui/spinner"
 
 export function OptionsScreen({
   persona,
@@ -17,11 +18,12 @@ export function OptionsScreen({
   persona: string
   value: Record<string, string[]>
   onBack: () => void
-  onNext: (selections: Record<string, string[]>) => void
+  onNext: (selections: Record<string, string[]>) => Promise<void>
 }) {
   const [groups, setGroups] = useState<OptionGroup[]>([])
   const [selections, setSelections] = useState<Record<string, string[]>>(value)
   const [error, setError] = useState<string | null>(null)
+  const [resolving, setResolving] = useState(false)
 
   useEffect(() => {
     getOptions(persona)
@@ -61,6 +63,7 @@ export function OptionsScreen({
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
         {error && <p className="text-destructive text-sm">{error}</p>}
+        {groups.length === 0 && !error && <LoadingText>Loading applications…</LoadingText>}
         {groups.map((group) => (
           <div key={group.name} className="flex flex-col gap-2">
             <p className="text-sm font-medium capitalize">{group.name.replace(/-/g, " ")}</p>
@@ -113,10 +116,24 @@ export function OptionsScreen({
           </div>
         ))}
         <div className="flex justify-between">
-          <Button variant="outline" onClick={onBack}>
+          <Button variant="outline" disabled={resolving} onClick={onBack}>
             Back
           </Button>
-          <Button onClick={() => onNext(selections)}>Next</Button>
+          <Button
+            aria-busy={resolving}
+            disabled={resolving || groups.length === 0}
+            onClick={async () => {
+              setResolving(true)
+              try {
+                await onNext(selections)
+              } finally {
+                setResolving(false)
+              }
+            }}
+          >
+            {resolving && <Spinner />}
+            {resolving ? "Resolving packages…" : "Next"}
+          </Button>
         </div>
       </CardContent>
     </Card>
