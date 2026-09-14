@@ -116,6 +116,12 @@ Installation options:
 - **Hardware:** CPU microcode, Mesa/Vulkan drivers, and hypervisor guest tools
   are added for the detected hardware; time sync, TRIM, and Bluetooth are
   enabled when present.
+- **Extras:** Btrfs snapshots (snapper, snap-pac, grub-btrfs), Flatpak with
+  Flathub, gaming tweaks (GameMode), the NVIDIA open driver on Turing and
+  newer GPUs, fingerprint login (fprintd), TPM2 disk unlock, and Secure Boot
+  with sbctl (systemd-boot or Limine). Each is offered only when the hardware
+  and earlier choices support it.
+- **Locale:** suggested from the timezone and keyboard layout.
 
 The Arch keyring is refreshed before pacstrap. AUR packages are built with
 `yay` after the bootloader is installed, so a failed AUR build is reported as

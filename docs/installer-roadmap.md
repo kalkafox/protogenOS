@@ -1,7 +1,7 @@
 # Installer Roadmap
 
 Where the installer stands and what is left. P0 (reliability) and P1
-(archinstall parity) are done and verified in QEMU; everything below is open.
+(archinstall parity) are done and verified in QEMU.
 
 ## Housekeeping
 
@@ -11,21 +11,22 @@ Where the installer stands and what is left. P0 (reliability) and P1
 
 ## P2 — beyond archinstall
 
-- **Snapshots:** snapper with the existing `@snapshots` subvolume,
-  snap-pac pre/post pacman snapshots, and grub-btrfs boot entries.
-- **GPU drivers:** detect NVIDIA generation and offer `nvidia-open` (Turing
-  and newer) with headers, or keep nouveau; hybrid-graphics handling.
-- **Secure Boot:** sbctl key enrollment and signed boot files, for
-  systemd-boot and Limine first.
-- **TPM2 unlock** for LUKS (`systemd-cryptenroll`), keeping the passphrase as
-  a fallback.
-- **Fingerprint** enrollment when a reader is present.
-- **Flatpak/Flathub** toggle.
-- **Gaming tweaks:** `vm.max_map_count`, gamemode group membership.
-- **Locale suggestion** from the chosen timezone or keyboard layout.
-- **GUI polish:** disk layout preview (partition bar), live download progress,
-  "copy log / upload for a bug report" on the error screen.
-- **Boot menu entries** for `protogenos.installer=gui|tui`.
+Done, covered by unit tests and a dry run, but not yet verified in QEMU or on
+hardware: snapshots, NVIDIA driver, Secure Boot, TPM2 unlock, fingerprint
+(fprintd), Flatpak, gaming tweaks, locale suggestion, partition bar, log
+upload, and the text installer boot entry.
+
+Still open:
+
+- **Fingerprint enrollment during installation.** fprintd is installed, but
+  fingers are enrolled afterwards in System Settings; enrolling in the live
+  session needs fprintd on the ISO and a GUI flow for touching the sensor.
+- **Snapshot boot entries for systemd-boot and Limine** (for example
+  `limine-snapper-sync`, which is in the AUR).
+- **Secure Boot hardening:** unified kernel images so the initramfs is
+  signed, Limine config enrollment, and GRUB support.
+- **QEMU verification** of Secure Boot (OVMF with Setup Mode) and TPM2
+  (`swtpm`) installs.
 
 ## Known gaps and unverified paths
 
