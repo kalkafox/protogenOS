@@ -111,9 +111,11 @@ class InstallerBackendTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def _plan(self, *, aur: tuple[str, ...] = (), multilib: bool = False) -> InstallPlan:
+    def _plan(
+        self, *, aur: tuple[str, ...] = (), multilib: bool = False, persona: str = "general"
+    ) -> InstallPlan:
         return InstallPlan(
-            persona="general",
+            persona=persona,
             packages=("base", "linux", "linux-firmware", "networkmanager", "sddm", *aur),
             selections={"kernel": ("linux",)},
             aur_packages=aur,
@@ -453,6 +455,22 @@ class InstallerBackendTests(unittest.TestCase):
         ):
             self.assertIn(unit, enable)
         self.assertNotIn("cups.socket", enable)
+
+    def test_minimal_install_skips_desktop_setup(self) -> None:
+        runner = FakeRunner()
+        self._backend(runner).install(self._plan(persona="minimal"), self._config())
+        pacstrap = next(command for command in runner.commands if command[0] == "pacstrap")
+        self.assertIn("nano", pacstrap)
+        self.assertIn("sudo", pacstrap)
+        self.assertNotIn("man-db", pacstrap)
+        enable = next(
+            command for command in runner.commands if command[2:4] == ("systemctl", "enable")
+        )
+        self.assertNotIn("sddm.service", enable)
+        self.assertIn("NetworkManager.service", enable)
+        self.assertFalse((self.target / "etc/skel/.config/kdeglobals").exists())
+        self.assertFalse((self.target / "etc/X11/xorg.conf.d/00-keyboard.conf").exists())
+        self.assertTrue((self.target / "etc/vconsole.conf").exists())
 
     def test_keyring_is_refreshed_before_pacstrap(self) -> None:
         runner = FakeRunner()

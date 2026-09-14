@@ -1,0 +1,8 @@
+# Plasma desktop layer for every persona except Minimal.
+plasma-meta
+sddm
+pipewire
+pipewire-pulse
+wireplumber
+xdg-desktop-portal-kde
+polkit-kde-agent

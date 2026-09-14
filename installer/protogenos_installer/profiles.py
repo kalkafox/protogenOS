@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .models import InstallPlan, OptionGroup, PackageChoice
 
-PERSONAS = ("general", "gamer", "developer")
+PERSONAS = ("general", "gamer", "developer", "minimal")
 SELECTION_TYPES = {"one-of", "any-of", "optional"}
 PACKAGE_SOURCES = {"official", "aur", "future"}
 PACKAGE_PATTERN = re.compile(r"^[A-Za-z0-9@._+:-]+$")
@@ -108,7 +108,10 @@ class ProfileRepository:
             raise ProfileError(f"unknown option groups: {', '.join(sorted(unknown_groups))}")
 
         packages: list[str] = list(load_package_manifest(self.root / "base.packages"))
-        packages.extend(load_package_manifest(self.root / "general.packages"))
+        # Minimal is console-only: no desktop and no General Use layer.
+        if persona != "minimal":
+            packages.extend(load_package_manifest(self.root / "desktop.packages"))
+            packages.extend(load_package_manifest(self.root / "general.packages"))
         if persona != "general":
             packages.extend(load_package_manifest(self.root / f"{persona}.packages"))
 

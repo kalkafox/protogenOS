@@ -29,6 +29,13 @@ class HardwareDetectionTests(unittest.TestCase):
             cpuinfo=self.cpuinfo, pci_root=self.pci, dmi_root=self.dmi, **kwargs
         )
 
+    def test_console_only_skips_graphics_and_gui_guest_tools(self) -> None:
+        self.cpuinfo.write_text("vendor_id\t: AuthenticAMD\n")
+        self._pci_device("0000:00:01.0", "0x030000", "0x1002")
+        (self.dmi / "sys_vendor").write_text("QEMU\n")
+        profile = self._detect(desktop=False)
+        self.assertEqual(profile.packages, ("amd-ucode", "qemu-guest-agent"))
+
     def test_intel_cpu_and_amd_gpu_on_bare_metal(self) -> None:
         self.cpuinfo.write_text("vendor_id\t: GenuineIntel\n")
         self._pci_device("0000:00:02.0", "0x060000", "0x8086")  # host bridge, ignored

@@ -601,7 +601,9 @@ class InstallerBackend:
                 self._seed_dry_run_root(config)
 
             self._step("Installing packages")
-            hardware = self.hardware_detector(multilib=plan.multilib_required)
+            hardware = self.hardware_detector(
+                multilib=plan.multilib_required, desktop=plan.desktop
+            )
             self.runner.emit(f"Detected hardware: {hardware.describe()}")
             self._select_mirrors(config)
             self._refresh_keyring()
@@ -761,7 +763,13 @@ class InstallerBackend:
     ) -> None:
         aur = set(plan.aur_packages)
         packages = [package for package in plan.packages if package not in aur]
-        packages.extend(("sudo", "nano", "man-db", "bash-completion"))
+        if plan.desktop:
+            packages.extend(("sudo", "nano", "man-db", "bash-completion"))
+        else:
+            # Minimal keeps only an editor, plus sudo when an account needs it.
+            packages.append("nano")
+            if config.grant_sudo or any(user.sudo for user in config.additional_users):
+                packages.append("sudo")
         packages.append(FILESYSTEM_PACKAGES[config.filesystem])
         if config.firmware == "uefi":
             packages.append("dosfstools")
@@ -838,8 +846,9 @@ class InstallerBackend:
         self._write_target("etc/locale.conf", f"LANG={config.locale}\n")
         self._enable_locale(config.locale)
         self._write_release_metadata(plan)
-        self._apply_desktop_theming(plan)
-        self._configure_keyboard(config)
+        if plan.desktop:
+            self._apply_desktop_theming(plan)
+            self._configure_desktop_keyboard(config)
         if config.swap == "zram":
             self._write_target("etc/systemd/zram-generator.conf", ZRAM_GENERATOR_CONF)
             self._write_target("etc/sysctl.d/99-vm-zram-parameters.conf", ZRAM_SYSCTL_CONF)
@@ -848,9 +857,9 @@ class InstallerBackend:
         self._chroot("hwclock", "--systohc")
         self._chroot("locale-gen")
         self._create_users(config)
-        self._enable_services(hardware)
+        self._enable_services(hardware, desktop=plan.desktop)
 
-    def _configure_keyboard(self, config: InstallConfig) -> None:
+    def _configure_desktop_keyboard(self, config: InstallConfig) -> None:
         layout, variant = config.keyboard_layout, config.keyboard_variant
         self._write_target("etc/X11/xorg.conf.d/00-keyboard.conf", x11_keyboard_conf(layout, variant))
         # Plasma reads its own kxkbrc once a user has one; seed new accounts.
@@ -879,13 +888,14 @@ class InstallerBackend:
     # Enabled only when the installed packages actually ship the unit.
     OPTIONAL_SERVICES = ("bluetooth.service", "cups.socket", "power-profiles-daemon.service")
 
-    def _enable_services(self, hardware: HardwareProfile | None) -> None:
+    def _enable_services(self, hardware: HardwareProfile | None, *, desktop: bool = True) -> None:
         services = [
             "NetworkManager.service",
-            "sddm.service",
             "systemd-timesyncd.service",
             "fstrim.timer",
         ]
+        if desktop:
+            services.insert(1, "sddm.service")
         candidates = [*self.OPTIONAL_SERVICES, *(hardware.services if hardware else ())]
         for unit in candidates:
             if (self.target_root / "usr/lib/systemd/system" / unit).exists():

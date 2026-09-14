@@ -10,6 +10,7 @@ const DESCRIPTIONS: Record<string, string> = {
   general: "Everyday desktop use with a browser and essentials.",
   gamer: "Gaming-focused, includes Steam/Lutris and multilib support.",
   developer: "Development tools, editors, and dotfiles.",
+  minimal: "Console-only system with the fewest packages; no desktop.",
 }
 
 export function PersonaScreen({

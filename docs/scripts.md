@@ -73,7 +73,7 @@ Starts the Python installation wizard. With no options it is interactive:
   --allow-aur --non-interactive --output plan.json
 ```
 
-Options include `--persona general|gamer|developer`, repeatable
+Options include `--persona general|gamer|developer|minimal`, repeatable
 `--select GROUP=CHOICE[,CHOICE]`, `--allow-aur`, `--non-interactive`,
 `--profiles-dir PATH`, and `--output PATH`. Non-interactive mode only creates a
 plan and never modifies disks. Interactive mode can continue into a guarded,

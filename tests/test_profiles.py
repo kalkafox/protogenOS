@@ -45,6 +45,18 @@ class ProfileRepositoryTests(unittest.TestCase):
         self.assertIn("base-devel", plan.packages)
         self.assertIn("neovim", plan.packages)
 
+    def test_minimal_is_console_only(self) -> None:
+        plan = self.repository.resolve("minimal")
+        self.assertEqual(plan.packages, ("base", "linux-firmware", "networkmanager", "linux"))
+        self.assertEqual(set(plan.selections), {"kernel"})
+        self.assertEqual(plan.aur_packages, ())
+        self.assertFalse(plan.desktop)
+
+    def test_desktop_personas_include_plasma(self) -> None:
+        plan = self.repository.resolve("general")
+        self.assertIn("plasma-meta", plan.packages)
+        self.assertTrue(plan.desktop)
+
     def test_developer_editor_replaces_default(self) -> None:
         plan = self.repository.resolve("developer", {"editor": ("kate",)})
         self.assertIn("kate", plan.packages)

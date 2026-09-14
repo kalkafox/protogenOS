@@ -92,6 +92,7 @@ def detect_hypervisor(dmi_root: Path = Path("/sys/class/dmi/id")) -> str | None:
 def detect_hardware(
     *,
     multilib: bool = False,
+    desktop: bool = True,
     cpuinfo: Path = Path("/proc/cpuinfo"),
     pci_root: Path = Path("/sys/bus/pci/devices"),
     dmi_root: Path = Path("/sys/class/dmi/id"),
@@ -100,23 +101,28 @@ def detect_hardware(
     gpu_vendors = detect_gpu_vendors(pci_root)
     hypervisor = detect_hypervisor(dmi_root)
 
-    packages: list[str] = ["mesa"]
+    # Console-only installs skip graphics stacks and GUI guest helpers.
+    packages: list[str] = ["mesa"] if desktop else []
     services: list[str] = []
-    if multilib:
+    if multilib and desktop:
         packages.append("lib32-mesa")
     if microcode:
         packages.append(microcode)
-    for vendor in gpu_vendors:
+    for vendor in gpu_vendors if desktop else ():
         packages.extend(_GPU_PACKAGES.get(vendor, ()))
         if multilib:
             packages.extend(_GPU_MULTILIB_PACKAGES.get(vendor, ()))
     if hypervisor == "qemu":
-        packages.extend(("qemu-guest-agent", "spice-vdagent"))
+        packages.append("qemu-guest-agent")
+        if desktop:
+            packages.append("spice-vdagent")
     elif hypervisor == "vmware":
-        packages.extend(("open-vm-tools", "gtkmm3"))
+        packages.append("open-vm-tools")
+        if desktop:
+            packages.append("gtkmm3")
         services.append("vmtoolsd.service")
     elif hypervisor == "virtualbox":
-        packages.append("virtualbox-guest-utils")
+        packages.append("virtualbox-guest-utils" if desktop else "virtualbox-guest-utils-nox")
         services.append("vboxservice.service")
     elif hypervisor == "hyperv":
         packages.append("hyperv")

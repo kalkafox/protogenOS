@@ -49,7 +49,7 @@ class WebApiTests(unittest.TestCase):
     def test_personas(self) -> None:
         status, payload = _request(f"{self.base_url}/api/personas")
         self.assertEqual(status, 200)
-        self.assertEqual(payload["personas"], ["general", "gamer", "developer"])
+        self.assertEqual(payload["personas"], ["general", "gamer", "developer", "minimal"])
 
     def test_system_reports_detected_firmware(self) -> None:
         status, payload = _request(f"{self.base_url}/api/system")

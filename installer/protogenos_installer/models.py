@@ -31,5 +31,9 @@ class InstallPlan:
     aur_packages: tuple[str, ...]
     multilib_required: bool
 
+    @property
+    def desktop(self) -> bool:
+        return self.persona != "minimal"
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

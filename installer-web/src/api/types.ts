@@ -1,4 +1,4 @@
-export type Persona = "general" | "gamer" | "developer"
+export type Persona = "general" | "gamer" | "developer" | "minimal"
 
 export interface PackageChoice {
   group: string

@@ -5,10 +5,16 @@ with `base`, applies one persona, and then resolves the user's application
 choices.
 
 ```text
-base + general + selected applications
-base + general + gamer + selected applications
-base + general + developer + selected applications
+base + desktop + general + selected applications
+base + desktop + general + gamer + selected applications
+base + desktop + general + developer + selected applications
+base + minimal + kernel
 ```
+
+The Minimal persona is console-only: `base`, `linux-firmware`, NetworkManager,
+the chosen kernel, and `nano`, plus CPU microcode and hypervisor guest tools
+when detected. It skips the Plasma desktop layer, General Use apps, GPU
+userspace drivers, and theming, and offers only the kernel choice.
 
 ## Selection rules
 
