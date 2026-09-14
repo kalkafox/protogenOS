@@ -3,23 +3,8 @@
 Where the installer stands and what is left. P0 (reliability) and P1
 (archinstall parity) are done and verified in QEMU; everything below is open.
 
-## Decisions needed
-
-- **AUR themes on by default.** `sweet-theme-git` and `sddm-eucalyptus-drop`
-  are `default=yes` in `profiles/options.conf`, so every default install needs
-  AUR opt-in and `--non-interactive` fails without `--allow-aur`. This is the
-  cause of the 3 failing tests in `tests/test_profiles.py`. Either make them
-  opt-in or update the tests.
-- **Duplicate login manager.** `plasma-meta` now pulls `plasma-login-manager`
-  alongside SDDM. SDDM is the one enabled; decide whether to switch or exclude
-  the other.
-
 ## Housekeeping
 
-- Commit the work (currently all uncommitted), in logical pieces: GUI launcher
-  fix, P0, P1.
-- `docs/installer.md` predates the web GUI, network step, and P1 options;
-  rewrite it (README already covers the user-facing summary).
 - Add the Playwright GUI walkthrough (dry-run API, mocked disks) as a script
   and run it in CI next to the unit tests.
 - Add a QEMU install smoke test to CI for at least one layout.
@@ -50,8 +35,8 @@ Where the installer stands and what is left. P0 (reliability) and P1
 - **Post-install chroot shell** offer (CLI/TUI) is covered by unit tests only.
 - **VMware, VirtualBox, Hyper-V** guest tools and **real Wi-Fi hardware** are
   covered by unit tests and `mac80211_hwsim` only.
-- **SDDM layout indicator** shows "us" even though Xorg applies the chosen
-  layout.
+- **Login screen keyboard layout** with Plasma Login Manager is untested;
+  only the X11 and Plasma user (`kxkbrc`) layouts are written.
 - **Wi-Fi passphrase** is briefly visible in the live session's process list
   (`iwctl --passphrase`); never logged.
 - **TUI keyboard list** (98 layouts) has no type-to-jump search.
