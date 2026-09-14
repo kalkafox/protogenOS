@@ -1,6 +1,6 @@
 # Plasma desktop layer for every persona except Minimal.
 plasma-meta
-sddm
+plasma-login-manager
 pipewire
 pipewire-pulse
 wireplumber

@@ -116,7 +116,7 @@ class InstallerBackendTests(unittest.TestCase):
     ) -> InstallPlan:
         return InstallPlan(
             persona=persona,
-            packages=("base", "linux", "linux-firmware", "networkmanager", "sddm", *aur),
+            packages=("base", "linux", "linux-firmware", "networkmanager", "plasma-login-manager", *aur),
             selections={"kernel": ("linux",)},
             aur_packages=aur,
             multilib_required=multilib,
@@ -466,7 +466,7 @@ class InstallerBackendTests(unittest.TestCase):
         enable = next(
             command for command in runner.commands if command[2:4] == ("systemctl", "enable")
         )
-        self.assertNotIn("sddm.service", enable)
+        self.assertNotIn("plasmalogin.service", enable)
         self.assertIn("NetworkManager.service", enable)
         self.assertFalse((self.target / "etc/skel/.config/kdeglobals").exists())
         self.assertFalse((self.target / "etc/X11/xorg.conf.d/00-keyboard.conf").exists())

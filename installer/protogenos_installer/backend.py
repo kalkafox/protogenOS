@@ -895,7 +895,7 @@ class InstallerBackend:
             "fstrim.timer",
         ]
         if desktop:
-            services.insert(1, "sddm.service")
+            services.insert(1, "plasmalogin.service")
         candidates = [*self.OPTIONAL_SERVICES, *(hardware.services if hardware else ())]
         for unit in candidates:
             if (self.target_root / "usr/lib/systemd/system" / unit).exists():
@@ -1094,7 +1094,6 @@ class InstallerBackend:
     def _apply_desktop_theming(self, plan: InstallPlan) -> None:
         icon_selected = "papirus" in plan.selections.get("icon-theme", ())
         theme_selected = "sweet" in plan.selections.get("global-theme", ())
-        sddm_selected = "eucalyptus-drop" in plan.selections.get("sddm-theme", ())
 
         look_and_feel = (
             "com.github.vinceliuice.sweet-dark" if theme_selected else "org.kde.breezedark.desktop"
@@ -1137,12 +1136,6 @@ class InstallerBackend:
             "NoDisplay=true\n"
             "Name=protogenOS theme setup\n",
         )
-
-        if sddm_selected:
-            self._write_target(
-                "etc/sddm.conf.d/10-protogenos-theme.conf",
-                "[Theme]\nCurrent=eucalyptus-drop\n",
-            )
 
     def _install_aur_packages(self, plan: InstallPlan, config: InstallConfig) -> None:
         """Build AUR packages with yay (resolves AUR dependencies).
