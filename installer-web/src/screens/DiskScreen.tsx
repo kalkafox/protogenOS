@@ -3,6 +3,7 @@ import { useEffect, useState } from "react"
 import { getDiskLayout, getDisks } from "@/api/client"
 import type { DiskChoice, DiskInfo, DiskLayout, DiskLayoutKind, Firmware } from "@/api/types"
 import { ChoiceList } from "@/components/ChoiceList"
+import { PartitionBar } from "@/components/PartitionBar"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -121,7 +122,14 @@ export function DiskScreen({
 
         {layout && (
           <div className="flex flex-col gap-2">
-            <Label>Installation type</Label>
+            <PartitionBar
+              layout={layout}
+              kind={kind}
+              rootPartition={rootPartition}
+              bootPartition={bootPartition}
+              formatBoot={formatBoot}
+            />
+            <Label className="pt-2">Installation type</Label>
             <ChoiceList
               name="layout"
               value={kind}

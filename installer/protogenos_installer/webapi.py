@@ -31,6 +31,7 @@ from .backend import (
 )
 from .hardware import detect_features, detect_hardware
 from .locales import suggest_locale
+from .logshare import LogShareError, log_tail, upload_log
 from .keyboard import LAYOUT_PATTERN, VARIANT_PATTERN, console_keymap, list_layouts
 from .mirrors import parse_reflector_countries
 from .storage import StorageError, read_disk_layout
@@ -139,6 +140,7 @@ def make_handler(
     wifi_client: IwdClient | None = None,
     log_path: Path | None = None,
     keyboard_state: Path | None = None,
+    log_uploader: Callable[[bytes], str] = upload_log,
 ) -> type[BaseHTTPRequestHandler]:
     repository = ProfileRepository(profiles_dir)
     wifi_client = wifi_client or IwdClient()
@@ -250,6 +252,8 @@ def make_handler(
                     self._handle_install_start()
                 elif path == "/api/install/status" and method == "GET":
                     self._handle_install_status(query)
+                elif path == "/api/install/log/upload" and method == "POST":
+                    self._handle_log_upload()
                 elif method == "GET" and not path.startswith("/api/"):
                     self._serve_static(path)
                 else:
@@ -442,6 +446,18 @@ def make_handler(
                 since = 0
             self._send_json(HTTPStatus.OK, session.snapshot(since))
 
+        def _handle_log_upload(self) -> None:
+            snapshot = session.snapshot(0)
+            if snapshot["status"] == "running":
+                raise ApiError(HTTPStatus.CONFLICT, "the installation is still running")
+            if not snapshot["lines"]:
+                raise ApiError(HTTPStatus.NOT_FOUND, "there is no installation log yet")
+            try:
+                link = log_uploader(log_tail(snapshot["lines"]))
+            except LogShareError as error:
+                raise ApiError(HTTPStatus.BAD_GATEWAY, str(error)) from error
+            self._send_json(HTTPStatus.OK, {"url": link})
+
         def _serve_static(self, path: str) -> None:
             relative = path.lstrip("/") or "index.html"
             candidate = (dist_dir / relative).resolve()
@@ -489,6 +505,7 @@ def create_server(
     wifi_client: IwdClient | None = None,
     log_path: Path | None = None,
     keyboard_state: Path | None = None,
+    log_uploader: Callable[[bytes], str] = upload_log,
 ) -> ThreadingHTTPServer:
     handler = make_handler(
         profiles_dir=profiles_dir,
@@ -499,6 +516,7 @@ def create_server(
         wifi_client=wifi_client,
         log_path=log_path,
         keyboard_state=keyboard_state,
+        log_uploader=log_uploader,
     )
     return ThreadingHTTPServer((host, port), handler)
 

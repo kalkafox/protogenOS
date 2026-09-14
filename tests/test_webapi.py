@@ -73,6 +73,39 @@ class WebApiTests(unittest.TestCase):
         self.assertEqual(payload, {"locale": "de_DE.UTF-8"})
         suggest.assert_called_once_with("Europe/Berlin", "de")
 
+    def test_log_upload_shares_finished_install_log(self) -> None:
+        uploads: list[bytes] = []
+
+        def fake_upload(data: bytes) -> str:
+            uploads.append(data)
+            return "https://paste.rs/abc"
+
+        server = create_server(
+            profiles_dir=Path(__file__).resolve().parents[1] / "profiles",
+            dist_dir=self.dist_dir,
+            session=self.session,
+            log_uploader=fake_upload,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host, port = server.server_address[:2]
+        url = f"http://{host}:{port}/api/install/log/upload"
+        try:
+            status, payload = _request(url, method="POST")
+            self.assertEqual(status, 404)
+            self.session.start()
+            self.session.append_log("+ pacstrap /mnt base")
+            status, payload = _request(url, method="POST")
+            self.assertEqual(status, 409)
+            self.session.finish("pacstrap failed")
+            status, payload = _request(url, method="POST")
+            self.assertEqual((status, payload), (200, {"url": "https://paste.rs/abc"}))
+            self.assertEqual(uploads, [b"+ pacstrap /mnt base\n"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
     def test_reboot_refused_while_installing(self) -> None:
         self.assertTrue(self.session.start())
         status, payload = _request(f"{self.base_url}/api/system/reboot", method="POST")

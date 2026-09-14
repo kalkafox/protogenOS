@@ -136,3 +136,7 @@ export function startInstall(
 export function getInstallStatus(since: number): Promise<InstallStatus> {
   return request(`/api/install/status?since=${since}`)
 }
+
+export function uploadInstallLog(): Promise<{ url: string }> {
+  return request("/api/install/log/upload", { method: "POST" })
+}
