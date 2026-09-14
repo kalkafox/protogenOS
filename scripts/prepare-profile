@@ -87,6 +87,8 @@ done < <(find \
     "${target_profile}/syslinux" \
     -type f -print0 2>/dev/null)
 
+"${project_root}/scripts/add-installer-boot-entries" "${target_profile}"
+
 profile_definition="${target_profile}/profiledef.sh"
 sed -i \
     -e 's/^iso_name=.*/iso_name="protogenos"/' \

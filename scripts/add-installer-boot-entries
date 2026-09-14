@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Add "text installer" boot menu entries (protogenos.installer=tui) next to
+# the default live entry in every Archiso boot configuration of a profile.
+# The default entry keeps starting the graphical installer.
+
+profile_dir="${1:?usage: add-installer-boot-entries PROFILE_DIR}"
+tui_parameter="protogenos.installer=tui"
+tui_suffix="with text installer"
+
+# systemd-boot (UEFI): copy the default entry and sort it right after.
+default_entry="${profile_dir}/efiboot/loader/entries/01-archiso-linux.conf"
+tui_entry="${profile_dir}/efiboot/loader/entries/01-archiso-linux-tui.conf"
+if [[ -f "${default_entry}" ]]; then
+    sed \
+        -e "s/^title .*/& ${tui_suffix}/" \
+        -e 's/^sort-key .*/sort-key 01a/' \
+        -e "s/^options .*/& ${tui_parameter}/" \
+        "${default_entry}" > "${tui_entry}"
+fi
+
+# GRUB (UEFI and BIOS from the ISO, plus loopback booting): repeat the
+# menuentry with id 'archlinux' as 'archlinux-tui'.
+for grub_config in "${profile_dir}/grub/grub.cfg" "${profile_dir}/grub/loopback.cfg"; do
+    [[ -f "${grub_config}" ]] || continue
+    awk -v parameter="${tui_parameter}" -v suffix="${tui_suffix}" '
+        { print }
+        /--id .archlinux. \{/ { copying = 1; block = "" }
+        copying { block = block $0 "\n" }
+        copying && /^}/ {
+            copying = 0
+            sub(/\)" --class/, ") " suffix "\" --hotkey t --class", block)
+            sub(/--id .archlinux. \{/, "--id '\''archlinux-tui'\'' {", block)
+            n = split(block, lines, "\n")
+            printf "\n"
+            for (i = 1; i < n; i++) {
+                line = lines[i]
+                if (line ~ /^ +linux /) line = line " " parameter
+                print line
+            }
+        }
+    ' "${grub_config}" > "${grub_config}.tmp"
+    mv "${grub_config}.tmp" "${grub_config}"
+done
+
+# Syslinux (BIOS): repeat the "LABEL arch" block as "LABEL archtui".
+syslinux_config="${profile_dir}/syslinux/archiso_sys-linux.cfg"
+if [[ -f "${syslinux_config}" ]]; then
+    awk -v parameter="${tui_parameter}" -v suffix="${tui_suffix}" '
+        function flush() {
+            if (block == "") return
+            n = split(block, lines, "\n")
+            print ""
+            for (i = 1; i < n; i++) {
+                line = lines[i]
+                if (line == "LABEL arch") line = "LABEL archtui"
+                else if (line ~ /^Boot the .* on BIOS\.$/) sub(/\.$/, " " suffix ".", line)
+                else if (line ~ /^MENU LABEL /) line = line " " suffix
+                else if (line ~ /^APPEND /) line = line " " parameter
+                print line
+            }
+            block = ""
+        }
+        /^LABEL arch$/ { copying = 1 }
+        copying && /^$/ { copying = 0; flush() }
+        { print }
+        copying { block = block $0 "\n" }
+        END { if (copying) flush() }
+    ' "${syslinux_config}" > "${syslinux_config}.tmp"
+    mv "${syslinux_config}.tmp" "${syslinux_config}"
+fi
