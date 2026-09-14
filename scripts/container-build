@@ -4,12 +4,27 @@ set -euo pipefail
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_root="$(mktemp -d /tmp/protogenos-build.XXXXXXXX)"
 
+build_root_mounts() {
+    findmnt -rn -o TARGET | grep -F -- "${build_root}/" | sort -r || true
+}
+
 cleanup() {
     # mkarchiso normally removes its own work directory after a successful
     # build. Only remove our exact temporary directory after checking it.
-    if [[ "${build_root}" == /tmp/protogenos-build.* ]]; then
-        rm -rf -- "${build_root}"
+    [[ "${build_root}" == /tmp/protogenos-build.* ]] || return 0
+
+    # An interrupted build leaves the airootfs chroot mounts in place. Its
+    # /dev is the kernel's shared devtmpfs, so deleting through it removes
+    # the host's device nodes. Detach every mount first, deepest first.
+    local mountpoint
+    while IFS= read -r mountpoint; do
+        umount --lazy -- "${mountpoint}" || true
+    done < <(build_root_mounts)
+    if [[ -n "$(build_root_mounts)" ]]; then
+        echo "Leaving ${build_root} in place: filesystems are still mounted under it." >&2
+        return 0
     fi
+    rm -rf --one-file-system -- "${build_root}"
 }
 trap cleanup EXIT
 
