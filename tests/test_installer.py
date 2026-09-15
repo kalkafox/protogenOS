@@ -596,6 +596,20 @@ class InstallerBackendTests(unittest.TestCase):
         ))
         self.assertIn("ParallelDownloads = 15\n", (self.target / "etc/pacman.conf").read_text())
 
+    def test_first_login_applies_icons_after_look_and_feel(self) -> None:
+        plan = InstallPlan(
+            persona="general",
+            packages=("base", "plasma-meta", "papirus-icon-theme"),
+            selections={"kernel": ("linux",), "icon-theme": ("papirus",)},
+            aur_packages=(),
+            multilib_required=False,
+        )
+        self._backend(FakeRunner()).install(plan, self._config())
+        script = (self.target / "usr/local/bin/protogenos-apply-theme").read_text().splitlines()
+        look_and_feel = script.index("plasma-apply-lookandfeel -a org.kde.breezedark.desktop")
+        self.assertEqual(script[look_and_feel + 1], "/usr/lib/plasma-changeicons Papirus-Dark")
+        self.assertIn("Theme=Papirus-Dark", (self.target / "etc/skel/.config/kdeglobals").read_text())
+
     def test_keyring_is_refreshed_before_pacstrap(self) -> None:
         runner = FakeRunner()
         self._backend(runner).install(self._plan(), self._config())

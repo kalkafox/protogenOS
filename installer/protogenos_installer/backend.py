@@ -1516,11 +1516,14 @@ class InstallerBackend:
         # kdeglobals' LookAndFeel key is only a record of the last-applied
         # package; Plasma never auto-applies it on its own. Force a real
         # first-login apply (dark plasma theme, colors, splash, decoration)
-        # via a self-removing autostart entry.
+        # via a self-removing autostart entry. Applying a look-and-feel also
+        # applies its own icon theme (breeze-dark for Breeze Dark), so the
+        # chosen icons are applied again afterwards.
         self._write_target(
             "usr/local/bin/protogenos-apply-theme",
             "#!/bin/sh\n"
             f"plasma-apply-lookandfeel -a {shlex.quote(look_and_feel)}\n"
+            f"/usr/lib/plasma-changeicons {shlex.quote(icon_theme)}\n"
             'rm -f "$HOME/.config/autostart/protogenos-apply-theme.desktop"\n',
         )
         (self.target_root / "usr/local/bin/protogenos-apply-theme").chmod(0o755)
