@@ -50,7 +50,12 @@ def offered_features(
         return offers
     offers.append(FeatureOffer("flatpak", "Flatpak", "apps from Flathub, also in Discover", persona != "minimal"))
     offers.append(
-        FeatureOffer("gaming_tweaks", "Gaming tweaks", "GameMode for all users, no split-lock slowdown", persona == "gamer")
+        FeatureOffer(
+            "gaming_tweaks",
+            "Gaming tweaks",
+            "GameMode, game-performance, NTSync, bigger shader caches, no split-lock slowdown",
+            persona == "gamer",
+        )
     )
     if hardware.nvidia_open_supported:
         offers.append(

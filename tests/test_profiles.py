@@ -41,6 +41,27 @@ class ProfileRepositoryTests(unittest.TestCase):
         self.assertIn("steam", plan.packages)
         self.assertTrue(plan.multilib_required)
 
+    def test_gamer_gets_runtime_libraries_and_official_tools_by_default(self) -> None:
+        plan = self.repository.resolve("gamer")
+        for package in ("umu-launcher", "lib32-mangohud", "openal", "lib32-gtk3", "goverlay", "protontricks"):
+            self.assertIn(package, plan.packages)
+        self.assertEqual(plan.aur_packages, ())
+        self.assertEqual(plan.selections["proton"], ())
+
+    def test_gamer_aur_launchers_and_proton_builds_are_opt_in(self) -> None:
+        plan = self.repository.resolve(
+            "gamer",
+            {
+                "gaming-launcher": ("steam", "heroic", "faugus"),
+                "proton": ("proton-ge", "proton-cachyos"),
+                "gaming-tools": ("protonup-qt",),
+            },
+        )
+        self.assertEqual(
+            set(plan.aur_packages),
+            {"heroic-games-launcher-bin", "faugus-launcher", "proton-ge-custom-bin", "proton-cachyos-slr", "protonup-qt"},
+        )
+
     def test_developer_layers_general_packages(self) -> None:
         plan = self.repository.resolve("developer")
         self.assertIn("discover", plan.packages)

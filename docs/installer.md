@@ -108,8 +108,8 @@ Minimal are console only; the others add `profiles/desktop.packages`: Plasma
 (`plasma-meta`), Plasma Login Manager, PipeWire, and the KDE portal.
 
 `profiles/options.conf` defines selectable groups (kernel, browser, terminal,
-file manager, editor, container runtime, launchers, themes, fonts), one per
-line:
+file manager, editor, container runtime, game launchers, Proton builds, gaming
+tools, themes, fonts), one per line:
 
 ```text
 group|selection|id|label|package|source|default|profiles
@@ -119,6 +119,18 @@ group|selection|id|label|package|source|default|profiles
 `aur`, or `future`. `default` is `yes`, `no`, or a comma-separated list of the
 personas the choice is preselected for (for example `linux-lts` for Server
 only). AUR options default to off, so a default install needs no AUR packages.
+
+## Gamer persona
+
+Gamer follows CachyOS's gaming guide using official Arch packages:
+`profiles/gamer.packages` adds GameMode, MangoHud (with lib32), Gamescope,
+Wine, winetricks, umu-launcher, and the runtime libraries from CachyOS's
+`cachyos-gaming-meta` (OpenAL, mpg123, GStreamer base, lib32 GTK 3, VA-API,
+OpenCL loaders, Liberation and WenQuanYi fonts). Steam is preselected;
+GOverlay and Protontricks are preselected tools. Opt-in AUR choices: Heroic
+and Faugus launchers, Proton-GE and Proton-CachyOS (the Steam Linux Runtime
+build, recommended by CachyOS for anti-cheat games), and ProtonUp-Qt. Valve's
+Proton comes with Steam and stays the recommended default.
 
 ## Server persona
 
@@ -205,7 +217,7 @@ use the field names below; all default to off.
 | --- | --- | --- | --- |
 | `snapshots` | Btrfs with subvolumes | on | snapper root config on `@snapshots` with hourly/daily timeline cleanup, snap-pac pre/post pacman snapshots, and an initial "protogenOS installation" snapshot. With GRUB, grub-btrfs adds a snapshot submenu; snapshots boot with `systemd.volatile=overlay` because they are read-only. |
 | `flatpak` | not Server | on except Minimal | Flatpak with the system-wide Flathub remote. |
-| `gaming_tweaks` | always | on for Gamer | GameMode (plus lib32 with multilib) with every user in the `gamemode` group, and `kernel.split_lock_mitigate = 0`. Arch already raises `vm.max_map_count`. |
+| `gaming_tweaks` | not Server | on for Gamer | GameMode (plus lib32 with multilib) with every user in the `gamemode` group; `kernel.split_lock_mitigate = 0`; the `ntsync` module loaded at boot for Wine and Proton builds that use it; 12 GB Mesa and NVIDIA shader caches in `/etc/environment.d`; and `/usr/local/bin/game-performance`, a launch wrapper (`game-performance %command%`) that holds power-profiles-daemon's performance profile while the game runs. Arch already raises `vm.max_map_count`. |
 | `nvidia_driver` | NVIDIA GPU, Turing (GTX 16xx/RTX 20xx) or newer | `nvidia-open` | `nvidia-open` for `linux`, `nvidia-open-dkms` plus headers for other kernels, `nvidia-utils`, `nvidia-prime` on hybrid graphics; replaces nouveau's Vulkan driver and drops the `kms` initramfs hook. Older cards keep `nouveau`. |
 | `fingerprint` | libfprint-supported USB reader | on | Installs fprintd. Fingers are enrolled after installing, in System Settings → Users. |
 | `tpm2_unlock` | LUKS encryption and a TPM 2.0 | off | `systemd-cryptenroll` binds a TPM2 key slot to PCR 7 and adds `rd.luks.options=<uuid>=tpm2-device=auto`. The passphrase stays as a fallback. Requires the systemd initramfs. |

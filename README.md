@@ -78,7 +78,7 @@ to the text installer when no display device exists, and the boot menu has a
 | Persona | What you get |
 | --- | --- |
 | **General Use** | Plasma desktop, PipeWire, Discover, Firefox and everyday KDE apps |
-| **Gamer** | General Use plus Steam or Lutris, GameMode, MangoHud, Gamescope and Wine |
+| **Gamer** | General Use plus Steam, Lutris, Heroic or Faugus, GameMode, MangoHud, Gamescope, Wine, NTSync and game-performance; optional Proton-GE and Proton-CachyOS |
 | **Developer** | General Use plus `base-devel`, Git, Podman, debugging tools and your choice of editor |
 | **Server** | Headless system with key-only SSH, firewalld, the LTS kernel and Podman or Docker; optional Cockpit, Netdata and fail2ban |
 | **Minimal** | Console-only system with no desktop and the fewest packages |

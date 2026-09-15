@@ -771,7 +771,7 @@ class InstallerBackendTests(unittest.TestCase):
         )
         self._backend(runner).install(self._plan(multilib=True), config)
         pacstrap = self._pacstrap(runner)
-        for package in ("flatpak", "gamemode", "lib32-gamemode"):
+        for package in ("flatpak", "gamemode", "lib32-gamemode", "power-profiles-daemon"):
             self.assertIn(package, pacstrap)
         chroot = self._chroot_commands(runner)
         self.assertTrue(any(command[:3] == ("flatpak", "remote-add", "--system") for command in chroot))
@@ -781,6 +781,13 @@ class InstallerBackendTests(unittest.TestCase):
             "split_lock_mitigate = 0",
             (self.target / "etc/sysctl.d/80-protogenos-gaming.conf").read_text(),
         )
+        environment = (self.target / "etc/environment.d/80-protogenos-gaming.conf").read_text()
+        self.assertIn("MESA_SHADER_CACHE_MAX_SIZE=12G", environment)
+        self.assertIn("__GL_SHADER_DISK_CACHE_SIZE=12000000000", environment)
+        self.assertEqual((self.target / "etc/modules-load.d/ntsync.conf").read_text(), "ntsync\n")
+        wrapper = self.target / "usr/local/bin/game-performance"
+        self.assertEqual(wrapper.stat().st_mode & 0o777, 0o755)
+        self.assertIn('powerprofilesctl launch -p performance', wrapper.read_text())
 
     def test_nvidia_open_replaces_nouveau_and_drops_kms_hook(self) -> None:
         runner = FakeRunner()

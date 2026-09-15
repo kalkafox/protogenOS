@@ -208,7 +208,8 @@ export function FeaturesScreen({
           title="Gaming tweaks"
           onChange={(next) => update("gaming_tweaks", next)}
         >
-          Feral GameMode for every user, and no split-lock slowdown in older games.
+          Feral GameMode for every user, the game-performance launcher (performance power profile while
+          a game runs), NTSync for Wine and Proton, 12 GB shader caches, and no split-lock slowdown.
         </Toggle>
 
         {hardware.nvidia_open_supported !== null && (

@@ -114,6 +114,27 @@ GRUB_BTRFS_CONFIG = 'GRUB_BTRFS_SNAPSHOT_KERNEL_PARAMETERS="systemd.volatile=ove
 # Proton games stall on split-lock detection's deliberate slowdown (SteamOS
 # default). vm.max_map_count is already raised by Arch's filesystem package.
 GAMING_SYSCTL_CONF = "kernel.split_lock_mitigate = 0\n"
+# Large games overflow the default shader caches and recompile every launch.
+GAMING_ENVIRONMENT_CONF = """# protogenOS gaming: keep up to 12 GB of compiled shaders.
+MESA_SHADER_CACHE_MAX_SIZE=12G
+__GL_SHADER_DISK_CACHE_SIZE=12000000000
+"""
+# /dev/ntsync lets Wine and Proton builds that support it emulate Windows
+# synchronization primitives in the kernel.
+NTSYNC_MODULES_CONF = "ntsync\n"
+# Steam launch option: game-performance %command%
+GAME_PERFORMANCE_SCRIPT = """#!/bin/sh
+# Run a game with the performance power profile, restoring the previous
+# profile when it exits. Based on CachyOS's game-performance.
+if ! command -v powerprofilesctl >/dev/null 2>&1 || ! powerprofilesctl list | grep -q 'performance:'; then
+    exec "$@"
+fi
+if [ -n "$GAME_PERFORMANCE_SCREENSAVER_ON" ]; then
+    exec powerprofilesctl launch -p performance -r "game-performance" -- "$@"
+fi
+exec systemd-inhibit --why "game-performance is running" \\
+    powerprofilesctl launch -p performance -r "game-performance" -- "$@"
+"""
 FLATHUB_REPO = "https://dl.flathub.org/repo/flathub.flatpakrepo"
 ZRAM_GENERATOR_CONF = """[zram0]
 zram-size = min(ram / 2, 8192)
@@ -967,7 +988,7 @@ class InstallerBackend:
         if config.flatpak:
             packages.append("flatpak")
         if config.gaming_tweaks:
-            packages.append("gamemode")
+            packages.extend(("gamemode", "power-profiles-daemon"))
             if plan.multilib_required:
                 packages.append("lib32-gamemode")
         if config.nvidia_driver == "nvidia-open":
@@ -1068,6 +1089,10 @@ class InstallerBackend:
                 self._warn("could not add the Flathub remote; add it later with flatpak remote-add")
         if config.gaming_tweaks:
             self._write_target("etc/sysctl.d/80-protogenos-gaming.conf", GAMING_SYSCTL_CONF)
+            self._write_target("etc/environment.d/80-protogenos-gaming.conf", GAMING_ENVIRONMENT_CONF)
+            self._write_target("etc/modules-load.d/ntsync.conf", NTSYNC_MODULES_CONF)
+            self._write_target("usr/local/bin/game-performance", GAME_PERFORMANCE_SCRIPT)
+            (self.target_root / "usr/local/bin/game-performance").chmod(0o755)
             for username in (config.username, *(user.username for user in config.additional_users)):
                 self._chroot("usermod", "--append", "--groups", "gamemode", username)
 

@@ -1,8 +1,28 @@
 # Gamer persona additions
 gamemode
 mangohud
+lib32-mangohud
 gamescope
 wine
 winetricks
+umu-launcher
 vulkan-tools
 lib32-vulkan-icd-loader
+# Libraries games commonly load at runtime (after CachyOS's gaming meta-package).
+alsa-plugins
+lib32-alsa-plugins
+giflib
+glfw
+gst-plugins-base-libs
+lib32-gtk3
+libjpeg-turbo
+lib32-libjpeg-turbo
+libva
+lib32-libva
+libxslt
+mpg123
+ocl-icd
+lib32-ocl-icd
+openal
+ttf-liberation
+wqy-zenhei
