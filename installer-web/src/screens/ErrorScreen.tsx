@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useState } from "react"
 
 import { getInstallStatus, uploadInstallLog } from "@/api/client"
+import { LogView } from "@/components/LogView"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { Spinner } from "@/components/ui/spinner"
 
 type ShareState =
@@ -22,17 +22,12 @@ export function ErrorScreen({
 }) {
   const [lines, setLines] = useState<string[]>([])
   const [share, setShare] = useState<ShareState>({ kind: "idle" })
-  const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     getInstallStatus(0)
       .then((status) => setLines(status.lines))
       .catch(() => setLines([]))
   }, [])
-
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" })
-  }, [lines])
 
   const upload = async () => {
     setShare({ kind: "uploading" })
@@ -54,12 +49,7 @@ export function ErrorScreen({
 
         {lines.length > 0 && (
           <>
-            <ScrollArea className="bg-muted h-64 rounded-md border p-3">
-              <pre className="font-mono text-xs whitespace-pre-wrap">
-                {lines.join("\n")}
-                <div ref={bottomRef} />
-              </pre>
-            </ScrollArea>
+            <LogView lines={lines} className="h-64" />
 
             {share.kind === "confirm" && (
               <div className="flex flex-col gap-3 rounded-md border p-3">

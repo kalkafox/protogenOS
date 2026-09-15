@@ -43,8 +43,11 @@ the `cage` Wayland compositor. Its log is `/tmp/protogenos-install-web.log`.
 Screens, in order: keyboard, network, persona, options, AUR confirmation
 (only when AUR packages are selected), disk (with a partition bar showing
 what is kept, erased, and used), storage, extras, users and system, review,
-progress, and done or error. The error screen shows the install log and can
-upload it to `paste.rs` for a bug report after asking for confirmation.
+progress, and done or error. The progress and error screens show the install
+log color-coded by line type (steps, commands, warnings, errors) and render
+any ANSI colors a tool prints; the log file itself stays plain text. The
+error screen can upload the log to `paste.rs` for a bug report after asking
+for confirmation.
 
 Main API routes:
 

@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from "react"
 
 import { getInstallStatus } from "@/api/client"
 import type { InstallStatus } from "@/api/types"
+import { LogView } from "@/components/LogView"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Progress } from "@/components/ui/progress"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { Spinner } from "@/components/ui/spinner"
 
 export function ProgressScreen({
@@ -17,7 +17,6 @@ export function ProgressScreen({
   const [lines, setLines] = useState<string[]>([])
   const [step, setStep] = useState<InstallStatus["step"]>(null)
   const sinceRef = useRef(0)
-  const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -49,10 +48,6 @@ export function ProgressScreen({
     }
   }, [onDone, onError])
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" })
-  }, [lines])
-
   // A step counts as done once the next one starts; give half credit for
   // the step in progress so the bar moves as soon as installation begins.
   const progressValue = step
@@ -72,12 +67,7 @@ export function ProgressScreen({
           </p>
           <Progress value={progressValue} />
         </div>
-        <ScrollArea className="bg-muted h-80 rounded-md border p-3">
-          <pre className="font-mono text-xs whitespace-pre-wrap">
-            {lines.join("\n")}
-            <div ref={bottomRef} />
-          </pre>
-        </ScrollArea>
+        <LogView lines={lines} className="h-80" />
       </CardContent>
     </Card>
   )
