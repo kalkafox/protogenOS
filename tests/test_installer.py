@@ -585,6 +585,17 @@ class InstallerBackendTests(unittest.TestCase):
         config.validate(self.zoneinfo)
         self.assertEqual(config.static_dns, ("1.1.1.1",))
 
+    def test_mirrors_are_ranked_and_downloads_parallelized(self) -> None:
+        runner = FakeRunner()
+        self.pacman_config.write_text("[options]\nParallelDownloads = 5\n")
+        self._backend(runner).install(self._plan(), self._config())
+        reflector = next(command for command in runner.commands if command[0] == "reflector")
+        self.assertNotIn("--country", reflector)
+        self.assertLess(runner.commands.index(reflector), next(
+            index for index, command in enumerate(runner.commands) if command[0] == "pacstrap"
+        ))
+        self.assertIn("ParallelDownloads = 15\n", (self.target / "etc/pacman.conf").read_text())
+
     def test_keyring_is_refreshed_before_pacstrap(self) -> None:
         runner = FakeRunner()
         self._backend(runner).install(self._plan(), self._config())

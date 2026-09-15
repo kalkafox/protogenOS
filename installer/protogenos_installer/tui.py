@@ -903,7 +903,7 @@ def _collect_install_config(
     mirror_country = _text_input(
         stdscr,
         "Package mirrors",
-        "Country for mirrors (e.g. Germany; leave empty for automatic):",
+        "Country for mirrors (e.g. Germany; leave empty for fastest worldwide):",
         "",
         lambda value: (not value or bool(COUNTRY_PATTERN.fullmatch(value)), "Use a country name such as Germany."),
     )

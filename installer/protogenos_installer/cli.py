@@ -292,7 +292,7 @@ def _choose_install_config(plan: InstallPlan, *, dry_run: bool = False) -> Insta
         "Use a UTF-8 locale such as en_US.UTF-8.",
     )
     mirror_country = _prompt_matching(
-        "Mirror country (empty for automatic)", "", re.compile(rf"^$|{COUNTRY_PATTERN.pattern}"), "Use a country name such as Germany."
+        "Mirror country (empty for fastest worldwide)", "", re.compile(rf"^$|{COUNTRY_PATTERN.pattern}"), "Use a country name such as Germany."
     )
     password = _prompt_password(username)
 
@@ -512,7 +512,7 @@ def _finalize_install(
         f"  Sudo access: {'yes (root login locked)' if config.grant_sudo else 'no (root has its own password)'}"
     )
     print(f"  Locale/timezone: {config.locale} / {config.timezone}")
-    print(f"  Mirrors: {config.mirror_country or 'automatic'}")
+    print(f"  Mirrors: {config.mirror_country or 'fastest worldwide'}")
     if plan.persona == SERVER_PERSONA:
         print(f"  SSH: key-only, {len(config.ssh_authorized_keys)} authorized key(s)")
         print(f"  Network: {describe_network(config)}")

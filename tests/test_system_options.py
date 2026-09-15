@@ -6,7 +6,7 @@ from protogenos_installer.backend import InstallConfig
 from protogenos_installer.bootloader import add_encrypt_hook, kernel_cmdline, set_shell_variable
 from protogenos_installer.config_io import ConfigFileError, export_config, export_credentials, load_documents
 from protogenos_installer.keyboard import console_keymap, list_layouts
-from protogenos_installer.mirrors import enable_parallel_downloads, parse_reflector_countries
+from protogenos_installer.mirrors import enable_parallel_downloads, parse_reflector_countries, reflector_command
 from protogenos_installer.models import InstallPlan
 from protogenos_installer.storage import parse_disk_layout
 
@@ -65,10 +65,19 @@ class MirrorTests(unittest.TestCase):
         self.assertEqual(countries[1].count, 140)
 
     def test_parallel_downloads(self) -> None:
-        self.assertIn("\nParallelDownloads = 5\n", enable_parallel_downloads("[options]\n#ParallelDownloads = 5\n"))
-        self.assertIn("[options]\nParallelDownloads = 5\n", enable_parallel_downloads("[options]\nCheckSpace\n"))
-        kept = "[options]\nParallelDownloads = 10\n"
-        self.assertEqual(enable_parallel_downloads(kept), kept)
+        self.assertIn("\nParallelDownloads = 15\n", enable_parallel_downloads("[options]\n#ParallelDownloads = 5\n"))
+        self.assertIn("[options]\nParallelDownloads = 15\n", enable_parallel_downloads("[options]\nCheckSpace\n"))
+        self.assertEqual(
+            enable_parallel_downloads("[options]\nParallelDownloads = 5\n"), "[options]\nParallelDownloads = 15\n"
+        )
+
+    def test_reflector_ranks_fastest_mirrors_worldwide_or_by_country(self) -> None:
+        worldwide = reflector_command()
+        self.assertNotIn("--country", worldwide)
+        for option, value in (("--sort", "rate"), ("--fastest", "10"), ("--protocol", "https")):
+            self.assertEqual(worldwide[worldwide.index(option) + 1], value)
+        country = reflector_command("Germany")
+        self.assertEqual(country[country.index("--country") + 1], "Germany")
 
 
 class BootConfigTests(unittest.TestCase):

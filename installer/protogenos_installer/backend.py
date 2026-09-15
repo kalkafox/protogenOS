@@ -654,6 +654,7 @@ class InstallerBackend:
         "pacstrap",
         "parted",
         "partprobe",
+        "reflector",
         "sync",
         "udevadm",
         "umount",
@@ -798,8 +799,6 @@ class InstallerBackend:
         commands += FILESYSTEM_TOOLS[config.filesystem]
         if config.encrypt:
             commands.append("cryptsetup")
-        if config.mirror_country:
-            commands.append("reflector")
         return tuple(commands)
 
     def _validate_environment(self, config: InstallConfig) -> None:
@@ -874,13 +873,12 @@ class InstallerBackend:
     # -- packages ---------------------------------------------------------
 
     def _select_mirrors(self, config: InstallConfig) -> None:
-        if not config.mirror_country:
-            return
+        # Without a country, rank mirrors worldwide; the live ISO otherwise
+        # uses its full, unranked mirror list.
         result = self.runner.run(reflector_command(config.mirror_country), check=False)
         if result.returncode != 0:
-            self._warn(
-                f"could not rank mirrors for {config.mirror_country}; using the default mirror list"
-            )
+            where = f"in {config.mirror_country}" if config.mirror_country else "worldwide"
+            self._warn(f"could not rank mirrors {where}; using the default mirror list")
 
     def _refresh_keyring(self) -> None:
         # Signing keys rotate; an older ISO's keyring rejects current packages.

@@ -32,17 +32,27 @@ def parse_reflector_countries(output: str) -> tuple[MirrorCountry, ...]:
     return tuple(countries)
 
 
-def reflector_command(country: str, mirrorlist: str = "/etc/pacman.d/mirrorlist") -> list[str]:
-    return [
-        "reflector",
-        "--country",
-        country,
+PARALLEL_DOWNLOADS = 15
+
+
+def reflector_command(country: str = "", mirrorlist: str = "/etc/pacman.d/mirrorlist") -> list[str]:
+    """Rank recently synced HTTPS mirrors by measured speed, worldwide or in one country."""
+    command = ["reflector"]
+    if country:
+        command += ["--country", country]
+    return command + [
         "--protocol",
         "https",
+        "--age",
+        "12",
         "--latest",
-        "20",
+        "30",
+        "--fastest",
+        "10",
         "--sort",
         "rate",
+        "--threads",
+        "8",
         "--connection-timeout",
         "5",
         "--download-timeout",
@@ -52,14 +62,11 @@ def reflector_command(country: str, mirrorlist: str = "/etc/pacman.d/mirrorlist"
     ]
 
 
-def enable_parallel_downloads(config: str, count: int = 5) -> str:
-    """Turn on pacman's ParallelDownloads unless the config already sets it."""
+def enable_parallel_downloads(config: str, count: int = PARALLEL_DOWNLOADS) -> str:
+    """Set pacman's ParallelDownloads to count, replacing any existing value."""
     lines = config.splitlines()
     for index, line in enumerate(lines):
-        stripped = line.strip()
-        if re.match(r"^ParallelDownloads\s*=", stripped):
-            return config if config.endswith("\n") else config + "\n"
-        if re.match(r"^#\s*ParallelDownloads\s*=", stripped):
+        if re.match(r"^#?\s*ParallelDownloads\s*=", line.strip()):
             lines[index] = f"ParallelDownloads = {count}"
             return "\n".join(lines) + "\n"
     for index, line in enumerate(lines):

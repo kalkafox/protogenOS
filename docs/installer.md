@@ -150,9 +150,10 @@ The backend reports numbered steps to every front end:
 1. **Checking the installation environment** — root, required tools, target
    is an unmounted block device, `/mnt` free, the live medium excluded.
 2. **Preparing disks** — partition, optionally encrypt, format, and mount.
-3. **Installing packages** — rank mirrors with reflector for the chosen
-   country, refresh the Arch keyring, enable ParallelDownloads (and multilib
-   when needed), write `vconsole.conf`, run `pacstrap` with download progress,
+3. **Installing packages** — rank mirrors with reflector (the 10 fastest of
+   the 30 most recently synced HTTPS mirrors, in the chosen country or
+   worldwide; the default list is kept if ranking fails), refresh the Arch
+   keyring, set ParallelDownloads to 15 (and enable multilib when needed), write `vconsole.conf`, run `pacstrap` with download progress,
    and generate `fstab`.
 4. **Configuring the system** — locale, timezone, hostname, branding
    (`os-release`, `issue`, `motd`), users and sudo, keyboard for X11 and
