@@ -34,15 +34,15 @@ and has its own installer, so you don't need to know Arch to set it up.
 - **Graphical and text installers.** A browser-based installer starts
   automatically on the live ISO. Machines without a display, and anyone who
   prefers the terminal, get a curses text installer with the same options.
-- **Personas.** Pick General Use, Gamer, Developer or Minimal, then swap
+- **Personas.** Pick General Use, Gamer, Developer, Server or Minimal, then swap
   individual apps: browser, terminal, file manager, editor, kernel and more.
 - **Storage options.** Erase a disk, install next to another OS, or reuse
   existing partitions. Btrfs, ext4, XFS or F2FS, with optional LUKS2 encryption.
 - **Hardware-aware extras.** Btrfs snapshots, Flatpak, gaming tweaks, the
   NVIDIA open driver, fingerprint login, TPM2 disk unlock and Secure Boot.
   Each is offered only when your hardware and earlier choices support it.
-- **Plain Arch underneath.** Official Arch packages and kernels (`linux` or
-  `linux-zen`). protogenOS builds no custom kernels or forks, so updates arrive
+- **Plain Arch underneath.** Official Arch packages and kernels (`linux`,
+  `linux-zen` or `linux-lts`). protogenOS builds no custom kernels or forks, so updates arrive
   as soon as Arch ships them.
 - **Reproducible builds.** Every ISO is built from this repository with
   Archiso, locally or in GitHub Actions.
@@ -80,6 +80,7 @@ to the text installer when no display device exists, and the boot menu has a
 | **General Use** | Plasma desktop, PipeWire, Discover, Firefox and everyday KDE apps |
 | **Gamer** | General Use plus Steam or Lutris, GameMode, MangoHud, Gamescope and Wine |
 | **Developer** | General Use plus `base-devel`, Git, Podman, debugging tools and your choice of editor |
+| **Server** | Headless system with key-only SSH, firewalld, the LTS kernel and Podman or Docker; optional Cockpit, Netdata and fail2ban |
 | **Minimal** | Console-only system with no desktop and the fewest packages |
 
 The installer walks through keyboard, network (with a Wi-Fi picker), persona

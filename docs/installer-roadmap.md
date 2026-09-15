@@ -16,6 +16,10 @@ hardware: snapshots, NVIDIA driver, Secure Boot, TPM2 unlock, fingerprint
 (fprintd), Flatpak, gaming tweaks, locale suggestion, partition bar, log
 upload, and the text installer boot entry.
 
+The Server persona (key-only SSH, firewalld, Cockpit, Netdata, fail2ban,
+update downloads, serial console, static addresses) is covered by unit tests
+and a GUI dry run, but no server install has been booted in QEMU yet.
+
 Still open:
 
 - **Fingerprint enrollment during installation.** fprintd is installed, but

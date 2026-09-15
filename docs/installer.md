@@ -42,8 +42,8 @@ the `cage` Wayland compositor. Its log is `/tmp/protogenos-install-web.log`.
 
 Screens, in order: keyboard, network, persona, options, AUR confirmation
 (only when AUR packages are selected), disk (with a partition bar showing
-what is kept, erased, and used), storage, extras, users and system, review,
-progress, and done or error. The progress and error screens show the install
+what is kept, erased, and used), storage, extras, users and system, server
+access (Server persona only), review, progress, and done or error. The progress and error screens show the install
 log color-coded by line type (steps, commands, warnings, errors) and render
 any ANSI colors a tool prints; the log file itself stays plain text. The
 error screen can upload the log to `paste.rs` for a bug report after asking
@@ -61,7 +61,8 @@ Main API routes:
 | `GET /api/disks`, `GET /api/disks/layout` | Target disks and their partitions |
 | `GET /api/timezones`, `GET /api/mirrors/countries` | System choices |
 | `GET /api/locales/suggest?timezone=&layout=` | Suggested locale |
-| `POST /api/config/validate` | Validate a configuration without installing |
+| `POST /api/config/validate` | Validate a configuration without installing; with `persona`, also persona-specific settings |
+| `GET /api/ssh/github-keys?username=` | Public SSH keys of a GitHub account, for Server installs |
 | `POST /api/install/start`, `GET /api/install/status` | Run and follow the install |
 | `POST /api/install/log/upload` | Upload the finished install's log, returning its link |
 | `POST /api/system/reboot` | Reboot when done |
@@ -102,20 +103,45 @@ wordmark; menu code should not duplicate branding strings elsewhere.
 
 ## Personas and options
 
-Personas are General Use, Gamer, Developer, and Minimal (console only, no
-Plasma). Desktop personas add `profiles/desktop.packages`: Plasma
+Personas are General Use, Gamer, Developer, Server, and Minimal. Server and
+Minimal are console only; the others add `profiles/desktop.packages`: Plasma
 (`plasma-meta`), Plasma Login Manager, PipeWire, and the KDE portal.
 
 `profiles/options.conf` defines selectable groups (kernel, browser, terminal,
-file manager, editor, launchers, themes, fonts), one per line:
+file manager, editor, container runtime, launchers, themes, fonts), one per
+line:
 
 ```text
 group|selection|id|label|package|source|default|profiles
 ```
 
 `selection` is `one-of`, `any-of`, or `optional`; `source` is `official`,
-`aur`, or `future`. AUR options default to off, so a default install needs no
-AUR packages.
+`aur`, or `future`. `default` is `yes`, `no`, or a comma-separated list of the
+personas the choice is preselected for (for example `linux-lts` for Server
+only). AUR options default to off, so a default install needs no AUR packages.
+
+## Server persona
+
+Server installs a headless system from `profiles/server.packages` (OpenSSH,
+firewalld, and a few admin tools) with `linux-lts` and Podman preselected;
+Docker with Compose is the alternative container runtime, and either can be
+unselected. The administrator is added to the `docker` group when Docker is
+chosen.
+
+- **SSH** is always enabled and key-only: `/etc/ssh/sshd_config.d/10-protogenos.conf`
+  turns off password, keyboard-interactive, and root logins. At least one
+  public key is required, pasted or imported from `https://github.com/<user>.keys`,
+  and written to the administrator's `~/.ssh/authorized_keys`.
+- **firewalld** is always enabled with the `public` zone, which allows SSH.
+  Cockpit and Netdata open their firewalld services when selected.
+- **Static address** (optional): an address with prefix, gateway, DNS servers,
+  and interface become a NetworkManager keyfile
+  (`protogenos-static.nmconnection`); the other IP family stays automatic.
+  Without it, wired connections use DHCP.
+
+Server-only settings (`ssh_authorized_keys`, `cockpit`, `netdata`, `fail2ban`,
+`update_downloads`, `serial_console`, and the `static_*` fields) are rejected
+for other personas.
 
 ## Install steps
 
@@ -169,18 +195,25 @@ Encryption is optional LUKS2 on root, opened as `cryptroot`.
 
 The GUI's Extras screen, a TUI checklist, and text prompts offer optional
 features. Features the machine or earlier choices can't support are hidden
-(TUI and text) or shown disabled with the reason (GUI). Saved configurations
+(TUI and text) or shown disabled with the reason (GUI). Server shows only
+snapshots and the server extras; the desktop and client-hardware extras are
+hidden. Saved configurations
 use the field names below; all default to off.
 
 | Setting | Offered when | Default | What it does |
 | --- | --- | --- | --- |
 | `snapshots` | Btrfs with subvolumes | on | snapper root config on `@snapshots` with hourly/daily timeline cleanup, snap-pac pre/post pacman snapshots, and an initial "protogenOS installation" snapshot. With GRUB, grub-btrfs adds a snapshot submenu; snapshots boot with `systemd.volatile=overlay` because they are read-only. |
-| `flatpak` | always | on except Minimal | Flatpak with the system-wide Flathub remote. |
+| `flatpak` | not Server | on except Minimal | Flatpak with the system-wide Flathub remote. |
 | `gaming_tweaks` | always | on for Gamer | GameMode (plus lib32 with multilib) with every user in the `gamemode` group, and `kernel.split_lock_mitigate = 0`. Arch already raises `vm.max_map_count`. |
 | `nvidia_driver` | NVIDIA GPU, Turing (GTX 16xx/RTX 20xx) or newer | `nvidia-open` | `nvidia-open` for `linux`, `nvidia-open-dkms` plus headers for other kernels, `nvidia-utils`, `nvidia-prime` on hybrid graphics; replaces nouveau's Vulkan driver and drops the `kms` initramfs hook. Older cards keep `nouveau`. |
 | `fingerprint` | libfprint-supported USB reader | on | Installs fprintd. Fingers are enrolled after installing, in System Settings → Users. |
 | `tpm2_unlock` | LUKS encryption and a TPM 2.0 | off | `systemd-cryptenroll` binds a TPM2 key slot to PCR 7 and adds `rd.luks.options=<uuid>=tpm2-device=auto`. The passphrase stays as a fallback. Requires the systemd initramfs. |
 | `secure_boot` | UEFI with systemd-boot or Limine | off | sbctl creates keys and signs the bootloader and kernel (re-signed on updates). In Setup Mode the keys are enrolled with Microsoft's certificates kept; otherwise the finish screen explains how to enroll later. |
+| `cockpit` | Server | off | Cockpit web console on port 9090 (`cockpit.socket`), plus `cockpit-podman` with Podman. Logs in with account passwords. |
+| `netdata` | Server | off | Netdata dashboard on port 19999. It listens on all interfaces; the firewall opens the port. |
+| `fail2ban` | Server | off | fail2ban's `sshd` jail reading the systemd journal, banning through firewalld rich rules. |
+| `update_downloads` | Server | off | A daily timer runs `checkupdates --download` (pacman-contrib), which syncs a private database copy and fills the package cache without installing anything or risking a partial upgrade. |
+| `serial_console` | Server | off | `console=tty0 console=ttyS0,115200` on the kernel command line, a `serial-getty@ttyS0` login, and GRUB's serial terminal. |
 
 Detection reads `/sys`: PCI device IDs for the NVIDIA generation,
 `/sys/class/tpm` for TPM 2.0, USB IDs against systemd's
