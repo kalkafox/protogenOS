@@ -136,6 +136,15 @@ exec systemd-inhibit --why "game-performance is running" \\
     powerprofilesctl launch -p performance -r "game-performance" -- "$@"
 """
 FLATHUB_REPO = "https://dl.flathub.org/repo/flathub.flatpakrepo"
+# Logos and configs so fastfetch and neofetch show protogenOS instead of Arch.
+FETCH_ASSETS = Path(__file__).resolve().parent / "assets" / "fetch"
+FETCH_FILES = (
+    ("fastfetch-logo.txt", "usr/share/protogenos/fastfetch-logo.txt"),
+    ("neofetch-logo.txt", "usr/share/protogenos/neofetch-logo.txt"),
+    ("fastfetch.jsonc", "etc/xdg/fastfetch/config.jsonc"),
+    # neofetch only reads a per-user config; seed new accounts.
+    ("neofetch.conf", "etc/skel/.config/neofetch/config.conf"),
+)
 ZRAM_GENERATOR_CONF = """[zram0]
 zram-size = min(ram / 2, 8192)
 compression-algorithm = zstd
@@ -1052,6 +1061,7 @@ class InstallerBackend:
         self._write_target("etc/locale.conf", f"LANG={config.locale}\n")
         self._enable_locale(config.locale)
         self._write_release_metadata(plan)
+        self._install_fetch_branding()
         if plan.desktop:
             self._apply_desktop_theming(plan)
             self._configure_desktop_keyboard(config)
@@ -1487,6 +1497,10 @@ class InstallerBackend:
         self._write_target(
             "etc/motd", "Welcome to protogenOS — furry-powered and Arch-based.\n"
         )
+
+    def _install_fetch_branding(self) -> None:
+        for asset, destination in FETCH_FILES:
+            self._write_target(destination, (FETCH_ASSETS / asset).read_text())
 
     def _apply_desktop_theming(self, plan: InstallPlan) -> None:
         icon_selected = "papirus" in plan.selections.get("icon-theme", ())

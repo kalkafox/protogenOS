@@ -8,3 +8,4 @@ rsync
 htop
 tmux
 smartmontools
+fastfetch

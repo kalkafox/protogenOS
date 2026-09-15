@@ -610,6 +610,18 @@ class InstallerBackendTests(unittest.TestCase):
         self.assertEqual(script[look_and_feel + 1], "/usr/lib/plasma-changeicons Papirus-Dark")
         self.assertIn("Theme=Papirus-Dark", (self.target / "etc/skel/.config/kdeglobals").read_text())
 
+    def test_fastfetch_and_neofetch_show_the_protogenos_logo(self) -> None:
+        self._backend(FakeRunner()).install(self._plan(persona="minimal"), self._config())
+        fastfetch = (self.target / "etc/xdg/fastfetch/config.jsonc").read_text()
+        self.assertIn('"source": "/usr/share/protogenos/fastfetch-logo.txt"', fastfetch)
+        self.assertIn('"modules"', fastfetch)
+        self.assertIn("$1", (self.target / "usr/share/protogenos/fastfetch-logo.txt").read_text())
+        self.assertIn("${c1}", (self.target / "usr/share/protogenos/neofetch-logo.txt").read_text())
+        self.assertIn(
+            'image_source="/usr/share/protogenos/neofetch-logo.txt"',
+            (self.target / "etc/skel/.config/neofetch/config.conf").read_text(),
+        )
+
     def test_keyring_is_refreshed_before_pacstrap(self) -> None:
         runner = FakeRunner()
         self._backend(runner).install(self._plan(), self._config())

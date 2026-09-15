@@ -53,6 +53,13 @@ else
     echo "installer will be unavailable on this profile (TUI still works)." >&2
 fi
 
+# fastfetch and neofetch show the protogenOS logo in the live session too.
+fetch_assets="${project_root}/installer/protogenos_installer/assets/fetch"
+install -Dm644 "${fetch_assets}/fastfetch-logo.txt" "${target_profile}/airootfs/usr/share/protogenos/fastfetch-logo.txt"
+install -Dm644 "${fetch_assets}/neofetch-logo.txt" "${target_profile}/airootfs/usr/share/protogenos/neofetch-logo.txt"
+install -Dm644 "${fetch_assets}/fastfetch.jsonc" "${target_profile}/airootfs/etc/xdg/fastfetch/config.jsonc"
+install -Dm644 "${fetch_assets}/neofetch.conf" "${target_profile}/airootfs/root/.config/neofetch/config.conf"
+
 # Keep the installer's live-environment dependencies explicit instead of
 # depending on the current contents of Archiso's releng package list.
 # cage/firefox/seatd/mesa/curl back the web GUI installer; mesa provides the
@@ -61,7 +68,7 @@ fi
 # falls back to the TUI below (via protogenos-install-web's own checks, and
 # zlogin's boot-cmdline override) on machines with no DRM device at all.
 for package in python arch-install-scripts dosfstools e2fsprogs parted \
-    cage firefox seatd mesa curl; do
+    cage firefox seatd mesa curl fastfetch; do
     if ! grep -qxF "${package}" "${target_profile}/packages.x86_64"; then
         printf '%s\n' "${package}" >> "${target_profile}/packages.x86_64"
     fi

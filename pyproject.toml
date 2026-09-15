@@ -15,3 +15,6 @@ protogenos-install = "protogenos_installer.cli:main"
 [tool.setuptools]
 package-dir = { "" = "installer" }
 packages = ["protogenos_installer"]
+
+[tool.setuptools.package-data]
+protogenos_installer = ["assets/fetch/*"]

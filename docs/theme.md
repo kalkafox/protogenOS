@@ -31,3 +31,15 @@ and selected states.
 - Include a calmer wallpaper option for users sensitive to bright imagery.
 
 The machine-readable starting colors live in `config/theme.conf`.
+
+## Terminal logo
+
+fastfetch and neofetch show a protogen visor logo, in Visor red and Snow,
+instead of Arch's. The logo and configs live in
+`installer/protogenos_installer/assets/fetch/`: `fastfetch-logo.txt` uses
+fastfetch's `$1`/`$2` color markers and `neofetch-logo.txt` uses neofetch's
+`${c1}`/`${c2}`, so edit both together. Installs and the live ISO get the
+system-wide `/etc/xdg/fastfetch/config.jsonc`. neofetch only reads a per-user
+config, so new accounts get `~/.config/neofetch/config.conf` from `/etc/skel`.
+fastfetch is installed on every persona except Minimal; neofetch is AUR-only and
+unmaintained, so it is not installed, but its config is ready if a user adds it.
