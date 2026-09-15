@@ -83,10 +83,19 @@ protogenos-install [--persona general|gamer|developer|minimal]
   disk. It fails if the plan needs AUR packages and `--allow-aur` is absent.
 - `--config` installs from a configuration saved with `--save-config` (or
   `/var/log/protogenos-install.json`). Passwords come from `--creds`, a JSON
-  file with `user_password`, `root_password`, and `encryption_passphrase`.
+  file with `user_password`, `root_password`, and `encryption_passphrase`:
+
+  ```json
+  {"version": 1, "user_password": "...", "root_password": null,
+   "encryption_passphrase": "...", "additional_users": {"kit": "..."}}
+  ```
 - `--unattended` skips the typed confirmation. It is destructive.
 - `--dry-run` logs every command instead of running it and writes to a
   throwaway directory. It needs neither root nor a disk.
+
+The text banner lives in `installer/protogenos_installer/branding.py`.
+`INSTALLER_BANNER` is the extension point for the future multiline ASCII-art
+wordmark; menu code should not duplicate branding strings elsewhere.
 
 ## Personas and options
 

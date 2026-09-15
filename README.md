@@ -1,238 +1,201 @@
-# protogenOS
+<h1 align="center">protogenOS</h1>
 
-protogenOS is a furry-themed, Arch-based Linux distribution with a visual
-identity inspired by protogens and the wider furry community.
+<p align="center"><strong>A furry-themed, Arch-based Linux distribution</strong></p>
 
-The project is currently in its bootstrap phase. The first milestone is a
-reproducible, branded live ISO built with Archiso. It will remain compatible
-with Arch's repositories while protogenOS-specific branding and defaults are
-delivered as a small set of separate packages.
+<p align="center">
+  <a href="LICENSE.md"><img alt="License: GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-D51F3D?style=flat-square&labelColor=141216"></a>
+  <img alt="Based on Arch Linux" src="https://img.shields.io/badge/based%20on-Arch%20Linux-D51F3D?style=flat-square&labelColor=141216">
+  <img alt="Desktop: KDE Plasma" src="https://img.shields.io/badge/desktop-KDE%20Plasma-D51F3D?style=flat-square&labelColor=141216">
+  <img alt="Status: pre-release" src="https://img.shields.io/badge/status-pre--release-721426?style=flat-square&labelColor=141216">
+</p>
 
-## Initial goals
+<p align="center">
+  <a href="#try-it">Try it</a> ·
+  <a href="#the-installer">Installer</a> ·
+  <a href="#building-the-iso">Build</a> ·
+  <a href="#development">Develop</a> ·
+  <a href="#documentation">Docs</a>
+</p>
 
-- Boot on BIOS and UEFI systems in a virtual machine.
-- Provide a polished furry-themed live desktop.
-- Install a usable Arch-based system with sensible defaults.
-- Offer the maintainer's `dotconfig` developer environment during installation.
-- Keep protogenOS customization separate from the upstream Archiso profile.
-- Make every release reproducible from this repository.
+---
 
-## Repository layout
+protogenOS is an Arch-based Linux distribution with a black-and-red look
+inspired by protogen visors, made by and for the furry community. It keeps
+Arch's official repositories and rolling updates, adds a KDE Plasma desktop,
+and has its own installer, so you don't need to know Arch to set it up.
 
-```text
-docs/       Project direction and design decisions
-config/     Release inputs shared by build and installer tooling
-profiles/   Persona package sets and selectable application groups
-overlays/   Files copied into the Archiso live filesystem
-installer/  Python installation wizard and guarded disk backend
-tests/      Installer and profile resolution tests
-packages/   Future PKGBUILDs for protogenOS packages
-scripts/    Profile preparation and build helpers
-.github/    Hosted ISO build workflow
-profile/    Generated Archiso profile (not committed)
-out/        Generated ISO images (not committed)
-```
+> [!WARNING]
+> protogenOS is **pre-release software**. The installer partitions and formats
+> disks. Try it in a virtual machine first, and back up anything important
+> before installing on real hardware.
 
-## Preparing a build profile
+## Highlights
 
-On an Arch Linux build system, install `archiso`, then run:
+- **Graphical and text installers.** A browser-based installer starts
+  automatically on the live ISO. Machines without a display, and anyone who
+  prefers the terminal, get a curses text installer with the same options.
+- **Personas.** Pick General Use, Gamer, Developer or Minimal, then swap
+  individual apps: browser, terminal, file manager, editor, kernel and more.
+- **Storage options.** Erase a disk, install next to another OS, or reuse
+  existing partitions. Btrfs, ext4, XFS or F2FS, with optional LUKS2 encryption.
+- **Hardware-aware extras.** Btrfs snapshots, Flatpak, gaming tweaks, the
+  NVIDIA open driver, fingerprint login, TPM2 disk unlock and Secure Boot.
+  Each is offered only when your hardware and earlier choices support it.
+- **Plain Arch underneath.** Official Arch packages and kernels (`linux` or
+  `linux-zen`). protogenOS builds no custom kernels or forks, so updates arrive
+  as soon as Arch ships them.
+- **Reproducible builds.** Every ISO is built from this repository with
+  Archiso, locally or in GitHub Actions.
+
+## Try it
+
+There are no published releases yet, so build the ISO first (see
+[Building the ISO](#building-the-iso)). Then boot it in QEMU:
 
 ```bash
-sudo pacman -S archiso
-./scripts/prepare-profile
+./scripts/create-vm-disk                          # 40G qcow2 disk in out/
+./scripts/run-iso --disk out/protogenos-dev.qcow2 # UEFI; add --bios for legacy
+./scripts/run-disk --disk out/protogenos-dev.qcow2  # boot the installed system
 ```
 
-This copies Archiso's current `releng` profile into `profile/` and applies the
-protogenOS overlay. The generated profile is disposable; project-owned changes
-belong in `overlays/`, packages, or preparation scripts. Preparation also
-brands the firmware boot menus and installs the `protogenos-install` wizard in
-the live environment.
-
-Build the ISO with:
+[`scripts/try-iso`](scripts/try-iso) does the same job as a single file you
+can copy anywhere, with no repository checkout needed:
 
 ```bash
-sudo ./scripts/build-iso
+./try-iso protogenos-*.iso        # install into a fresh disk image
+./try-iso --boot-disk             # boot the result
 ```
 
-The finished image will be written to `out/`.
+These need `qemu-desktop`, `edk2-ovmf` and `libarchive` on the host. KVM is
+used when available.
 
-### Docker build
+## The installer
 
-Docker can provide the Arch build environment without installing Archiso on
-the host:
+The live ISO opens the graphical installer on the first console. It falls back
+to the text installer when no display device exists, and the boot menu has a
+"with text installer" entry to force it.
+
+| Persona | What you get |
+| --- | --- |
+| **General Use** | Plasma desktop, PipeWire, Discover, Firefox and everyday KDE apps |
+| **Gamer** | General Use plus Steam or Lutris, GameMode, MangoHud, Gamescope and Wine |
+| **Developer** | General Use plus `base-devel`, Git, Podman, debugging tools and your choice of editor |
+| **Minimal** | Console-only system with no desktop and the fewest packages |
+
+The installer walks through keyboard, network (with a Wi-Fi picker), persona
+and apps, disk and storage, extras, users and system settings, then a review
+screen. Before touching a disk, it names exactly what will be lost: the GUI
+lists every affected partition and needs a ticked acknowledgement, and the
+text installer needs a typed confirmation such as `ERASE /dev/sda`.
+
+AUR packages are always opt-in and are built after the bootloader is
+installed, so a failed AUR build can't leave the system unbootable. Logs and
+the chosen configuration (without passwords) are saved to `/var/log/` on the
+installed system. Saved configurations can be replayed for unattended
+installs:
+
+```bash
+protogenos-install --save-config my-install.json
+protogenos-install --config my-install.json --creds creds.json --unattended
+```
+
+See [`docs/installer.md`](docs/installer.md) for every option, the storage
+layouts and the safety rules.
+
+## Building the ISO
+
+### With Docker (recommended)
+
+Works on any Linux host with Docker, including WSL2:
 
 ```bash
 ./scripts/docker-build
 ```
 
-The container requires `--privileged` because Archiso creates mounts while
-building its filesystem image. Only run the project-owned builder from trusted
-source. Set `PROTOGENOS_ARCH_IMAGE` to a dated official Arch image tag when a
-release needs a stable builder input; the default `archlinux:base` follows the
-rolling Arch image.
-
-### GitHub Actions
-
-`.github/workflows/build-iso.yml` builds through the same container on GitHub's
-standard Ubuntu runner when run manually or when a `v*` tag is pushed. It
-uploads the ISO and `SHA256SUMS` as a GitHub Actions artifact retained for 14
-days. Normal branch pushes do not start the comparatively expensive ISO build.
-
-## Installer
-
-The live environment starts the graphical installer (`protogenos-install-web`,
-a kiosk browser under cage) automatically on the primary console, and falls
-back to the text wizard (`protogenos-install`) on machines without a display
-device. Boot with `protogenos.installer=tui` to force the text wizard. Both
-open with a branded protogenOS title, ask whether the system is for General
-Use, Gaming, or Development, and resolve package alternatives into a
-reviewable plan. The graphical installer logs to
-`/tmp/protogenos-install-web.log`.
-
-Both front ends start with the keyboard layout (applied immediately, and
-used for the installed console, desktop, and disk-unlock prompt), then make
-sure the live session is online, offering a Wi-Fi picker (iwd) when it is not;
-Wi-Fi networks joined live are copied into the installed system's
-NetworkManager.
-
-Installation options:
-
-- **Disk layout:** erase the whole disk, install alongside other systems in
-  the largest unallocated space (a new EFI partition is created; existing
-  partitions are untouched), or format an existing root partition and reuse
-  an EFI system partition. The last two require UEFI and GPT.
-- **Filesystems:** Btrfs (default; zstd compression and `@`, `@home`, `@log`,
-  `@pkg`, and `@snapshots` subvolumes, or a flat volume without subvolumes),
-  ext4, XFS, or F2FS.
-- **Encryption:** optional LUKS2 root with an initramfs unlock prompt. On BIOS
-  systems an unencrypted ext4 `/boot` partition is added automatically.
-- **Bootloader:** GRUB (UEFI or BIOS, with os-prober when installing alongside
-  other systems), systemd-boot, or Limine (UEFI only). UEFI installs mount the
-  EFI system partition at `/boot`.
-- **Swap:** zram (default) or none.
-- **System:** hostname, locale, timezone, mirror country (ranked with
-  reflector), optional kernel headers, the administrator account, and any
-  number of additional users. pacman's ParallelDownloads is enabled.
-- **Hardware:** CPU microcode, Mesa/Vulkan drivers, and hypervisor guest tools
-  are added for the detected hardware; time sync, TRIM, and Bluetooth are
-  enabled when present.
-- **Extras:** Btrfs snapshots (snapper, snap-pac, grub-btrfs), Flatpak with
-  Flathub, gaming tweaks (GameMode), the NVIDIA open driver on Turing and
-  newer GPUs, fingerprint login (fprintd), TPM2 disk unlock, and Secure Boot
-  with sbctl (systemd-boot or Limine). Each is offered only when the hardware
-  and earlier choices support it.
-- **Locale:** suggested from the timezone and keyboard layout.
-
-The Arch keyring is refreshed before pacstrap. AUR packages are built with
-`yay` after the bootloader is installed, so a failed AUR build is reported as
-a warning instead of leaving an unbootable system. The command log is kept at
-`/var/log/protogenos-install.log`, and the chosen configuration (without
-passwords) at `/var/log/protogenos-install.json`, in both the live session
-and the installed system.
-
-Text-mode installs require typing a confirmation that names what will be
-destroyed: `ERASE /dev/...`, `INSTALL /dev/...` (free space), or
-`FORMAT /dev/...` (existing partitions). The graphical installer instead names
-the disk model, size, and every partition that will be lost, and requires
-ticking an acknowledgement before its install button unlocks. After a
-text-mode install you can
-open a shell inside the new system before it is unmounted.
-
-From a repository checkout or the booted ISO, run:
+The ISO and `SHA256SUMS` are written to `out/`. Downloaded packages are cached
+in `~/.cache/protogenos/pacman-pkg`, so later builds are faster. For quick
+local testing, skip the slow xz compression:
 
 ```bash
-./scripts/protogenos-install
-protogenos-install                       # inside the live ISO
-./scripts/protogenos-install --persona gamer \
-  --select kernel=linux-zen \
-  --select browser=firefox,brave \
-  --select gaming-launcher=steam,lutris \
-  --allow-aur --non-interactive --output plan.json
-
-# Save choices for reuse, then install from them later (passwords live in a
-# separate credentials file; --unattended skips the typed confirmation).
-protogenos-install --save-config my-install.json
-protogenos-install --config my-install.json --creds creds.json
-protogenos-install --config my-install.json --creds creds.json --unattended
+PROTOGENOS_FAST_BUILD=1 ./scripts/docker-build
 ```
 
-A credentials file looks like
-`{"version": 1, "user_password": "...", "root_password": null,
-"encryption_passphrase": "...", "additional_users": {"kit": "..."}}`.
+> [!NOTE]
+> The build container runs with `--privileged` because Archiso creates mounts.
+> Only build from source you trust.
 
-The text banner lives in
-`installer/protogenos_installer/branding.py`. `INSTALLER_BANNER` is the intended
-extension point for the future multiline ASCII-art wordmark; menu code should
-not duplicate branding strings elsewhere.
-
-Run its tests with:
+### On Arch Linux
 
 ```bash
+sudo pacman -S archiso
+./scripts/prepare-profile     # generates profile/ from Archiso's releng
+sudo ./scripts/build-iso
+```
+
+### In GitHub Actions
+
+The [Build protogenOS ISO](.github/workflows/build-iso.yml) workflow runs when
+started manually or when a `v*` tag is pushed. It uploads the ISO and checksums
+as a workflow artifact kept for 14 days.
+
+## Development
+
+```bash
+./scripts/dev-check                                     # tests, shell syntax, whitespace
 PYTHONPATH=installer python -m unittest discover -s tests -v
+./scripts/dev-web-installer                             # GUI installer in dry-run mode
+./scripts/run-kernel --headless                         # boot the ISO's kernel directly
 ```
 
-## Kernel choices
+`dev-web-installer` runs the installer API with `--dry-run` next to the Vite
+dev server. It needs no root, no ISO and no real disk, and it logs commands
+instead of running them. The frontend uses [Bun](https://bun.sh).
 
-The installer offers Arch's official `linux` and `linux-zen` packages. `linux`
-is the default for broad compatibility; `linux-zen` is an optional
-desktop-oriented alternative. protogenOS does not compile or distribute custom
-kernel binaries, keeping releases fast to build and aligned with Arch updates.
+### Repository layout
 
-## Development automation
-
-Install the native Arch development dependencies:
-
-```bash
-sudo pacman -S qemu-desktop edk2-ovmf libarchive
+```text
+installer/      Python installer: backend, text front ends, web API
+installer-web/  React + TypeScript graphical installer
+profiles/       Persona package sets and selectable app options
+overlays/       Files copied into the live ISO's filesystem
+config/         Shared release inputs, such as the theme palette
+scripts/        Build, QEMU and installer helper scripts
+docker/         Archiso builder image
+tests/          Installer unit tests
+packages/       PKGBUILDs for protogenOS packages (planned)
+docs/           Design decisions and reference documentation
 ```
 
-Run the fast development checks with:
+`profile/`, `work/` and `out/` are generated and never committed.
 
-```bash
-./scripts/dev-check
-```
+## Documentation
 
-After building an ISO, boot the newest image with QEMU and UEFI:
+| Document | Covers |
+| --- | --- |
+| [Installer architecture](docs/installer.md) | Front ends, API, install steps, storage, extras, safety |
+| [Installer roadmap](docs/installer-roadmap.md) | What is done, what is open, known gaps |
+| [Script reference](docs/scripts.md) | Every build, QEMU and installer script |
+| [Vision](docs/vision.md) | Identity, product principles, open decisions |
+| [Visual direction](docs/theme.md) | Color palette and artwork policy |
+| [Developer dotfiles](docs/dotfiles.md) | The optional `dotconfig` environment |
 
-```bash
-./scripts/run-iso
-./scripts/create-vm-disk                 # creates a 40G qcow2 disk in out/
-./scripts/run-iso --disk out/protogenos-dev.qcow2
-```
+## Contributing
 
-Use `--bios` to exercise legacy boot or `--headless` for a serial-only VM.
-Direct kernel/initramfs boot reads the kernel paths and Archiso options from the
-ISO's systemd-boot entry (also takes `--bios`/`--uefi`):
+Run `./scripts/dev-check` before opening a pull request, and do a Docker ISO
+build for build-system changes. Use short, imperative commit subjects with
+Conventional Commit prefixes, for example `feat(installer): add browser
+selection`. Pull requests should describe user-visible behavior and the
+testing done, include screenshots for installer or theme changes, and call out
+new repositories, AUR packages, privileged operations or destructive
+installation behavior. [`AGENTS.md`](AGENTS.md) has the full guidelines.
 
-```bash
-./scripts/run-kernel
-./scripts/run-kernel --uefi
-./scripts/run-kernel --headless --append "systemd.log_level=debug"
-```
+Artwork is shipped only with the artist's explicit permission and a documented
+redistribution license.
 
-After installing to a qcow2 disk, boot it directly with no ISO attached:
+## License
 
-```bash
-./scripts/run-disk --disk out/protogenos-dev.qcow2
-```
+protogenOS is licensed under the [GNU General Public License v3.0](LICENSE.md).
 
-Both ISO/kernel runners accept `--iso PATH`, `--memory MiB`, `--cpus COUNT`,
-and `--dry-run`; `run-disk` takes the same plus a required `--disk PATH`. QEMU,
-`qemu-img`, OVMF (`edk2-ovmf`), and `bsdtar` (`libarchive`) must be installed
-on the host. KVM is used automatically when available; otherwise the scripts
-fall back to software emulation. See [`docs/scripts.md`](docs/scripts.md) for
-the complete build, installer, and QEMU script reference.
-
-## Project status
-
-KDE Plasma is the first desktop target, with a black-and-red visual system
-inspired by protogen visors and synthetic materials. The ISO, boot menus,
-live-session identity, and installer carry protogenOS branding. The installer
-now performs guarded whole-disk installations using standard Arch tools. See
-`docs/installer.md` for its behavior and current limitations, and
-`docs/theme.md` and `docs/dotfiles.md` for the design language and optional
-developer-environment policy.
-
-Arch Linux is a trademark of its respective owner. protogenOS is an independent
-furry-themed distribution built using Arch Linux technology and is not endorsed
+Arch Linux is a trademark of its respective owner. protogenOS is an
+independent distribution built using Arch Linux technology and is not endorsed
 by or affiliated with the Arch Linux project.
