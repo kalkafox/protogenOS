@@ -52,6 +52,19 @@ and `PROTOGENOS_ARCH_IMAGE` changes its Arch base image. Only run the privileged
 container from trusted source. Successful builds replace prior ISO files and
 `SHA256SUMS` in `out/`.
 
+Downloaded packages persist in `~/.cache/protogenos/pacman-pkg`, which is
+bind-mounted over the container's pacman cache, so later builds only fetch
+packages that changed. `PROTOGENOS_PACMAN_CACHE` moves that directory; delete
+it to reclaim space.
+
+For quicker local iteration, `PROTOGENOS_FAST_BUILD=1` compresses the live root
+filesystem with zstd instead of xz. The build is much faster and the ISO is
+somewhat larger. Keep the default xz compression for release images.
+
+```bash
+PROTOGENOS_FAST_BUILD=1 ./scripts/docker-build
+```
+
 ### `scripts/container-build`
 
 Internal Docker/CI entry point used by `docker-build` and the ISO workflow. It

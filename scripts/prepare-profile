@@ -100,4 +100,17 @@ sed -i \
     -e '/^file_permissions=(/a\  ["/opt/protogenos/scripts/protogenos-install-web"]="0:0:755"' \
     "${profile_definition}"
 
+# Downloads dominate cold builds; releng ships only 5 parallel downloads.
+sed -i 's/^ParallelDownloads = .*/ParallelDownloads = 15/' \
+    "${target_profile}/pacman.conf"
+
+# xz squashfs compression is the slowest step of a warm build. zstd trades a
+# somewhat larger ISO for a much faster build; keep xz for releases.
+if [[ "${PROTOGENOS_FAST_BUILD:-}" == "1" ]]; then
+    sed -i \
+        "s/^airootfs_image_tool_options=.*/airootfs_image_tool_options=('-comp' 'zstd' '-Xcompression-level' '3' '-b' '1M')/" \
+        "${profile_definition}"
+    echo "PROTOGENOS_FAST_BUILD=1: compressing airootfs with zstd instead of xz." >&2
+fi
+
 echo "Prepared Archiso profile at ${target_profile}"
