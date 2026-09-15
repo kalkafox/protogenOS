@@ -35,6 +35,13 @@ from .models import InstallPlan, OptionGroup
 from .network import is_online
 from .storage import GIB, MIN_ROOT_BYTES, read_disk_layout
 from .profiles import PERSONAS, ProfileError, ProfileRepository
+from .server import (
+    SERVER_PERSONA,
+    ServerConfigError,
+    fetch_github_keys,
+    parse_authorized_keys,
+    validate_static_network,
+)
 
 
 _RED = "\033[31m"
@@ -300,6 +307,7 @@ def _choose_install_config(plan: InstallPlan, *, dry_run: bool = False) -> Insta
         name = _prompt_matching("User name", "", USERNAME_PATTERN, "Use lowercase letters, numbers, _ or -.")
         additional_users.append(UserAccount(name, _prompt_password(name), _yes(f"Grant {name} sudo access?")))
     kernel_headers = _yes("Install kernel headers (for DKMS modules)?")
+    server = _collect_server_settings(username) if plan.persona == SERVER_PERSONA else {}
 
     config = InstallConfig(
         disk=disk.path,
@@ -328,9 +336,60 @@ def _choose_install_config(plan: InstallPlan, *, dry_run: bool = False) -> Insta
         kernel_headers=kernel_headers,
         additional_users=tuple(additional_users),
         **features,
+        **server,
     )
     config.validate()
+    config.validate_for_persona(plan.persona)
     return config
+
+
+def _collect_ssh_keys(username: str) -> tuple[str, ...]:
+    print(f"\nPassword logins over SSH are disabled; add a public key for {username}.")
+    keys: list[str] = []
+    while True:
+        source = _choose("Add a key by pasting it or from a GitHub username", ["paste", "github"], "paste")
+        try:
+            if source == "github":
+                name = input("GitHub username: ").strip()
+                found = fetch_github_keys(name)
+                print(f"Found {len(found)} key(s) for {name}.")
+            else:
+                found = parse_authorized_keys(input("Public key (ssh-ed25519 AAAA... comment): "))
+                if not found:
+                    print("Paste a key starting with ssh-ed25519, ssh-rsa, or ecdsa-sha2-nistp256.")
+        except ServerConfigError as error:
+            print(error)
+            continue
+        keys.extend(key for key in found if key not in keys)
+        if keys and not _yes("Add another key?"):
+            return tuple(keys)
+
+
+def _collect_static_network() -> dict[str, object]:
+    if not _yes("Use a static IP address instead of DHCP?"):
+        return {}
+    while True:
+        address = input("Address with prefix (e.g. 192.168.1.10/24; empty keeps DHCP): ").strip()
+        if not address:
+            return {}
+        gateway = input("Gateway (empty for none): ").strip()
+        dns = tuple(input("DNS servers, separated by spaces (empty for none): ").split())
+        interface = input("Network interface (empty for any wired interface): ").strip()
+        try:
+            validate_static_network(address, gateway, dns, interface)
+        except ServerConfigError as error:
+            print(error)
+            continue
+        return {
+            "static_address": address,
+            "static_gateway": gateway,
+            "static_dns": dns,
+            "static_interface": interface,
+        }
+
+
+def _collect_server_settings(username: str) -> dict[str, object]:
+    return {"ssh_authorized_keys": _collect_ssh_keys(username), **_collect_static_network()}
 
 
 def _wait_for_network() -> bool:
@@ -386,10 +445,28 @@ def _describe_extras(config: InstallConfig) -> str:
             (config.fingerprint, "fingerprint login"),
             (config.tpm2_unlock, "TPM disk unlock"),
             (config.secure_boot, "Secure Boot"),
+            (config.cockpit, "Cockpit"),
+            (config.netdata, "Netdata"),
+            (config.fail2ban, "fail2ban"),
+            (config.update_downloads, "update downloads"),
+            (config.serial_console, "serial console"),
         )
         if enabled
     ]
     return ", ".join(extras) or "none"
+
+
+def describe_network(config: InstallConfig) -> str:
+    if not config.static_address:
+        return "DHCP"
+    details = [config.static_address]
+    if config.static_gateway:
+        details.append(f"via {config.static_gateway}")
+    if config.static_dns:
+        details.append(f"DNS {', '.join(config.static_dns)}")
+    if config.static_interface:
+        details.append(f"on {config.static_interface}")
+    return "static " + " ".join(details)
 
 
 def _describe_filesystem(config: InstallConfig) -> str:
@@ -436,6 +513,9 @@ def _finalize_install(
     )
     print(f"  Locale/timezone: {config.locale} / {config.timezone}")
     print(f"  Mirrors: {config.mirror_country or 'automatic'}")
+    if plan.persona == SERVER_PERSONA:
+        print(f"  SSH: key-only, {len(config.ssh_authorized_keys)} authorized key(s)")
+        print(f"  Network: {describe_network(config)}")
     if not unattended:
         phrase = confirmation_phrase(config)
         confirmation = input(f"\nType {phrase} to begin: ").strip()
@@ -515,6 +595,7 @@ def _install_from_config(args, repository: ProfileRepository) -> int:
     if plan.aur_packages and not (allow_aur or args.allow_aur):
         raise InstallError(f"AUR packages require allow_aur or --allow-aur: {', '.join(plan.aur_packages)}")
     config.validate()
+    config.validate_for_persona(plan.persona)
     _print_plan(plan)
     if args.output:
         _write_plan(args.output, plan)

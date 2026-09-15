@@ -40,6 +40,13 @@ from .storage import GIB, MIN_ROOT_BYTES, DiskLayout, read_disk_layout
 from .models import InstallPlan, OptionGroup, PackageChoice
 from .network import IwdClient, NetworkError, WifiNetwork, is_online
 from .profiles import PERSONAS, ProfileRepository
+from .server import (
+    SERVER_PERSONA,
+    ServerConfigError,
+    fetch_github_keys,
+    parse_authorized_keys,
+    validate_static_network,
+)
 
 _PAIR_HEADER = 1
 _PAIR_CURSOR = 2
@@ -51,6 +58,7 @@ _PERSONA_BLURBS = {
     "general": "Everyday desktop use with a browser and essentials.",
     "gamer": "Gaming-focused, includes Steam/Lutris and multilib support.",
     "developer": "Development tools, editors, and dotfiles.",
+    "server": "Headless server managed over SSH, with a firewall and optional services.",
     "minimal": "Console-only system with the fewest packages; no desktop.",
 }
 
@@ -909,6 +917,13 @@ def _collect_install_config(
         default=False,
     )
 
+    server: dict[str, object] = {}
+    if plan.persona == SERVER_PERSONA:
+        collected = _collect_server_settings(stdscr, username)
+        if collected is None:
+            return None
+        server = collected
+
     config = InstallConfig(
         disk=disk.path,
         firmware=firmware,
@@ -936,10 +951,93 @@ def _collect_install_config(
         kernel_headers=kernel_headers,
         additional_users=additional_users,
         **features,
+        **server,
     )
     try:
         config.validate()
+        config.validate_for_persona(plan.persona)
     except InstallError as error:
         _show_message(stdscr, str(error), danger=True)
         return _collect_install_config(stdscr, disk, runner, plan, keyboard, dry_run=dry_run)
     return config
+
+
+def _collect_ssh_keys(stdscr, username: str) -> tuple[str, ...] | None:
+    keys: list[str] = []
+    sources = [
+        Row(label="Paste a public key", detail="ssh-ed25519 AAAA... comment", detail_pair=_PAIR_HINT),
+        Row(label="Import from GitHub", detail="all keys of a GitHub account", detail_pair=_PAIR_HINT),
+    ]
+    while True:
+        action, index = _run_list(
+            stdscr, f"SSH key for {username} (password logins are disabled)", sources, multi=False
+        )
+        if action == "quit":
+            return None
+        try:
+            if index == 1:
+                name = _text_input(
+                    stdscr, "Import SSH keys", "GitHub username:", "", lambda value: (bool(value), "Enter a username.")
+                )
+                if name is None:
+                    return None
+                _show_status(stdscr, "Import SSH keys", f"Fetching keys for {name}...")
+                found = fetch_github_keys(name)
+            else:
+                line = _text_input(
+                    stdscr, "Paste SSH key", "Public key:", "", lambda value: (bool(value.strip()), "Paste a public key.")
+                )
+                if line is None:
+                    return None
+                found = parse_authorized_keys(line)
+        except ServerConfigError as error:
+            _show_message(stdscr, str(error), danger=True)
+            continue
+        keys.extend(key for key in found if key not in keys)
+        if not _confirm(stdscr, "SSH keys", f"{len(keys)} key(s) added.\nAdd another key?", default=False):
+            return tuple(keys)
+
+
+def _collect_static_network(stdscr) -> dict[str, object] | None:
+    if not _confirm(stdscr, "Network", "Use a static IP address instead of DHCP?", default=False):
+        return {}
+
+    def _optional(value: str) -> tuple[bool, str]:
+        return True, ""
+
+    prompts = (
+        ("Address with prefix (e.g. 192.168.1.10/24):", lambda value: (bool(value), "Enter an address such as 192.168.1.10/24.")),
+        ("Gateway (empty for none):", _optional),
+        ("DNS servers, separated by spaces (empty for none):", _optional),
+        ("Network interface (empty for any wired interface):", _optional),
+    )
+    while True:
+        answers: list[str] = []
+        for prompt, validate in prompts:
+            answer = _text_input(stdscr, "Static address", prompt, "", validate)
+            if answer is None:
+                return None
+            answers.append(answer.strip())
+        address, gateway, dns, interface = answers
+        servers = tuple(dns.split())
+        try:
+            validate_static_network(address, gateway, servers, interface)
+        except ServerConfigError as error:
+            _show_message(stdscr, str(error), danger=True)
+            continue
+        return {
+            "static_address": address,
+            "static_gateway": gateway,
+            "static_dns": servers,
+            "static_interface": interface,
+        }
+
+
+def _collect_server_settings(stdscr, username: str) -> dict[str, object] | None:
+    keys = _collect_ssh_keys(stdscr, username)
+    if keys is None:
+        return None
+    network = _collect_static_network(stdscr)
+    if network is None:
+        return None
+    return {"ssh_authorized_keys": keys, **network}
