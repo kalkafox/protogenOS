@@ -615,8 +615,8 @@ class InstallerBackendTests(unittest.TestCase):
         fastfetch = (self.target / "etc/xdg/fastfetch/config.jsonc").read_text()
         self.assertIn('"source": "/usr/share/protogenos/fastfetch-logo.txt"', fastfetch)
         self.assertIn('"modules"', fastfetch)
-        self.assertIn("$1", (self.target / "usr/share/protogenos/fastfetch-logo.txt").read_text())
-        self.assertIn("${c1}", (self.target / "usr/share/protogenos/neofetch-logo.txt").read_text())
+        self.assertIn("$2", (self.target / "usr/share/protogenos/fastfetch-logo.txt").read_text())
+        self.assertIn("${c2}", (self.target / "usr/share/protogenos/neofetch-logo.txt").read_text())
         self.assertIn(
             'image_source="/usr/share/protogenos/neofetch-logo.txt"',
             (self.target / "etc/skel/.config/neofetch/config.conf").read_text(),

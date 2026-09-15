@@ -34,8 +34,9 @@ The machine-readable starting colors live in `config/theme.conf`.
 
 ## Terminal logo
 
-fastfetch and neofetch show a protogen visor logo, in Visor red and Snow,
-instead of Arch's. The logo and configs live in
+fastfetch and neofetch show a pair of protogen ears in braille characters,
+in Snow, instead of Arch's logo; color `1` (Visor red) is reserved for future
+visor details. The logo and configs live in
 `installer/protogenos_installer/assets/fetch/`: `fastfetch-logo.txt` uses
 fastfetch's `$1`/`$2` color markers and `neofetch-logo.txt` uses neofetch's
 `${c1}`/`${c2}`, so edit both together. Installs and the live ISO get the
