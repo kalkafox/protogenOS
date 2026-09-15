@@ -1,4 +1,4 @@
-export type Persona = "general" | "gamer" | "developer" | "minimal"
+export type Persona = "general" | "gamer" | "developer" | "server" | "minimal"
 
 export interface PackageChoice {
   group: string
@@ -9,6 +9,7 @@ export interface PackageChoice {
   source: "official" | "aur" | "future"
   default: boolean
   profiles: string[]
+  default_profiles: string[]
 }
 
 export interface OptionGroup {
@@ -165,9 +166,24 @@ export interface FeatureChoice {
   fingerprint: boolean
   tpm2_unlock: boolean
   secure_boot: boolean
+  // Server persona extras.
+  cockpit: boolean
+  netdata: boolean
+  fail2ban: boolean
+  update_downloads: boolean
+  serial_console: boolean
 }
 
-export interface InstallConfig extends DiskChoice, StorageChoice, FeatureChoice, SystemChoice {
+// Server persona only; empty for every other persona.
+export interface ServerChoice {
+  ssh_authorized_keys: string[]
+  static_address: string
+  static_gateway: string
+  static_dns: string[]
+  static_interface: string
+}
+
+export interface InstallConfig extends DiskChoice, StorageChoice, FeatureChoice, SystemChoice, ServerChoice {
   firmware: Firmware
   keyboard_layout: string
   keyboard_variant: string

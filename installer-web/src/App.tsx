@@ -7,12 +7,14 @@ import type {
   Firmware,
   InstallConfig,
   InstallPlan,
+  ServerChoice,
   StorageChoice,
   SystemChoice,
   SystemInfo,
 } from "@/api/types"
 
 import { LoadingText } from "@/components/ui/spinner"
+import { EMPTY_SERVER } from "@/lib/server"
 
 import { KeyboardScreen } from "@/screens/KeyboardScreen"
 import { NetworkScreen } from "@/screens/NetworkScreen"
@@ -23,6 +25,7 @@ import { DiskScreen } from "@/screens/DiskScreen"
 import { StorageScreen } from "@/screens/StorageScreen"
 import { FeaturesScreen } from "@/screens/FeaturesScreen"
 import { UserConfigScreen } from "@/screens/UserConfigScreen"
+import { ServerScreen } from "@/screens/ServerScreen"
 import { ReviewScreen } from "@/screens/ReviewScreen"
 import { ProgressScreen } from "@/screens/ProgressScreen"
 import { DoneScreen } from "@/screens/DoneScreen"
@@ -39,6 +42,7 @@ type Step =
   | "storage"
   | "features"
   | "config"
+  | "server"
   | "review"
   | "progress"
   | "done"
@@ -56,6 +60,7 @@ function App() {
   const [storage, setStorage] = useState<StorageChoice | null>(null)
   const [features, setFeatures] = useState<FeatureChoice | null>(null)
   const [system, setSystem] = useState<SystemChoice | null>(null)
+  const [server, setServer] = useState<ServerChoice | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [warnings, setWarnings] = useState<string[]>([])
 
@@ -81,22 +86,26 @@ function App() {
     setStep("error")
   }, [])
 
+  const isServer = persona === "server"
   const buildConfig = useCallback(
-    (systemChoice: SystemChoice): InstallConfig => {
+    (systemChoice: SystemChoice, serverChoice: ServerChoice | null = null): InstallConfig => {
       if (!diskChoice || !storage || !features) throw new Error("disk, storage, and extras must be chosen first")
       return {
         ...diskChoice,
         ...storage,
         ...features,
         ...systemChoice,
+        // Server settings are rejected for other personas, so never send stale ones.
+        ...(isServer && serverChoice ? serverChoice : EMPTY_SERVER),
         firmware,
         keyboard_layout: keyboard.layout,
         keyboard_variant: keyboard.variant,
       }
     },
-    [diskChoice, storage, features, firmware, keyboard]
+    [diskChoice, storage, features, firmware, keyboard, isServer]
   )
-  const config = system && diskChoice && storage && features ? buildConfig(system) : null
+  const config =
+    system && diskChoice && storage && features && (!isServer || server) ? buildConfig(system, server) : null
 
   const handleOptionsNext = useCallback(
     async (nextSelections: Record<string, string[]>) => {
@@ -216,6 +225,19 @@ function App() {
           onBack={() => setStep("features")}
           onNext={(choice) => {
             setSystem(choice)
+            setStep(isServer ? "server" : "review")
+          }}
+        />
+      )}
+
+      {step === "server" && system && (
+        <ServerScreen
+          username={system.username}
+          value={server}
+          buildConfig={(choice) => buildConfig(system, choice)}
+          onBack={() => setStep("config")}
+          onNext={(choice) => {
+            setServer(choice)
             setStep("review")
           }}
         />
@@ -225,7 +247,7 @@ function App() {
         <ReviewScreen
           plan={plan}
           config={config}
-          onBack={() => setStep("config")}
+          onBack={() => setStep(isServer ? "server" : "config")}
           onInstall={handleInstall}
         />
       )}

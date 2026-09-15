@@ -113,13 +113,19 @@ export function suggestLocale(timezone: string, layout: string): Promise<{ local
   return request(`/api/locales/suggest?${query}`)
 }
 
+// With a persona, settings that depend on it (such as Server SSH keys) are checked too.
 export function validateConfig(
-  config: Partial<InstallConfig>
+  config: Partial<InstallConfig>,
+  persona?: string
 ): Promise<{ valid: boolean; error?: string }> {
   return request("/api/config/validate", {
     method: "POST",
-    body: JSON.stringify(config),
+    body: JSON.stringify(persona ? { ...config, persona } : config),
   })
+}
+
+export function getGithubKeys(username: string): Promise<{ keys: string[] }> {
+  return request(`/api/ssh/github-keys?username=${encodeURIComponent(username)}`)
 }
 
 export function startInstall(

@@ -11,14 +11,33 @@ import { Label } from "@/components/ui/label"
 function defaultFeatures(persona: string, storage: StorageChoice, system: SystemInfo): FeatureChoice {
   return {
     snapshots: storage.filesystem === "btrfs" && storage.btrfs_subvolumes,
-    flatpak: persona !== "minimal",
+    flatpak: persona !== "minimal" && persona !== "server",
     gaming_tweaks: persona === "gamer",
     nvidia_driver: system.hardware.nvidia_open_supported ? "nvidia-open" : "nouveau",
     fingerprint: system.features.fingerprint_reader,
     tpm2_unlock: false,
     secure_boot: false,
+    cockpit: false,
+    netdata: false,
+    fail2ban: false,
+    update_downloads: false,
+    serial_console: false,
   }
 }
+
+// Mirrors features.py: a server gets service extras instead of desktop and
+// client-hardware ones.
+const SERVER_EXTRAS: { key: keyof FeatureChoice; title: string; description: string }[] = [
+  { key: "cockpit", title: "Cockpit", description: "Web admin console on port 9090; the firewall opens it for you." },
+  { key: "netdata", title: "Netdata", description: "Live monitoring dashboard on port 19999; the firewall opens it for you." },
+  { key: "fail2ban", title: "fail2ban", description: "Temporarily bans addresses after repeated failed SSH logins." },
+  {
+    key: "update_downloads",
+    title: "Download updates daily",
+    description: "Fetches pending package updates in the background so installing them later is quick. Nothing is installed automatically.",
+  },
+  { key: "serial_console", title: "Serial console", description: "Login prompt and boot messages on ttyS0 at 115200 baud, for headless machines and VPSes." },
+]
 
 function Toggle({
   id,
@@ -91,14 +110,80 @@ export function FeaturesScreen({
   else
     tpmNote = "Unlocks the disk automatically while Secure Boot settings are unchanged. The passphrase keeps working as a fallback."
 
+  const server = persona === "server"
   const finish = () =>
     onNext({
       ...choice,
       snapshots: snapshotsAvailable && choice.snapshots,
-      secure_boot: secureBootAvailable && choice.secure_boot,
-      tpm2_unlock: tpmAvailable && choice.tpm2_unlock,
-      nvidia_driver: hardware.nvidia_open_supported ? choice.nvidia_driver : "nouveau",
+      ...(server
+        ? {
+            flatpak: false,
+            gaming_tweaks: false,
+            nvidia_driver: "nouveau",
+            fingerprint: false,
+            tpm2_unlock: false,
+            secure_boot: false,
+          }
+        : {
+            secure_boot: secureBootAvailable && choice.secure_boot,
+            tpm2_unlock: tpmAvailable && choice.tpm2_unlock,
+            nvidia_driver: hardware.nvidia_open_supported ? choice.nvidia_driver : "nouveau",
+            cockpit: false,
+            netdata: false,
+            fail2ban: false,
+            update_downloads: false,
+            serial_console: false,
+          }),
     })
+
+  const snapshotsToggle = (
+    <Toggle
+      id="snapshots"
+      checked={choice.snapshots}
+      disabled={!snapshotsAvailable}
+      title="System snapshots"
+      onChange={(next) => update("snapshots", next)}
+    >
+      {snapshotsAvailable
+        ? `Snapper takes a snapshot before and after every package change${
+            storage.bootloader === "grub" ? ", and GRUB can boot into older snapshots" : ""
+          }.`
+        : "Requires Btrfs with subvolumes."}
+    </Toggle>
+  )
+  const navigation = (
+    <div className="flex justify-between pt-2">
+      <Button variant="outline" onClick={onBack}>
+        Back
+      </Button>
+      <Button onClick={finish}>Next</Button>
+    </div>
+  )
+
+  if (server) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Extras</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          {snapshotsToggle}
+          {SERVER_EXTRAS.map((extra) => (
+            <Toggle
+              key={extra.key}
+              id={extra.key}
+              checked={choice[extra.key] === true}
+              title={extra.title}
+              onChange={(next) => update(extra.key, next)}
+            >
+              {extra.description}
+            </Toggle>
+          ))}
+          {navigation}
+        </CardContent>
+      </Card>
+    )
+  }
 
   return (
     <Card>
@@ -106,19 +191,7 @@ export function FeaturesScreen({
         <CardTitle>Extras</CardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
-        <Toggle
-          id="snapshots"
-          checked={choice.snapshots}
-          disabled={!snapshotsAvailable}
-          title="System snapshots"
-          onChange={(next) => update("snapshots", next)}
-        >
-          {snapshotsAvailable
-            ? `Snapper takes a snapshot before and after every package change${
-                storage.bootloader === "grub" ? ", and GRUB can boot into older snapshots" : ""
-              }.`
-            : "Requires Btrfs with subvolumes."}
-        </Toggle>
+        {snapshotsToggle}
 
         <Toggle
           id="flatpak"
@@ -202,12 +275,7 @@ export function FeaturesScreen({
           </p>
         )}
 
-        <div className="flex justify-between pt-2">
-          <Button variant="outline" onClick={onBack}>
-            Back
-          </Button>
-          <Button onClick={finish}>Next</Button>
-        </div>
+        {navigation}
       </CardContent>
     </Card>
   )

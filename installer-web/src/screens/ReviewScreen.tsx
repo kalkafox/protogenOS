@@ -9,6 +9,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { Spinner } from "@/components/ui/spinner"
 import { formatSize } from "@/lib/format"
+import { describeNetwork } from "@/lib/server"
 
 const BOOTLOADER_NAMES = { grub: "GRUB", "systemd-boot": "systemd-boot", limine: "Limine" }
 
@@ -20,6 +21,11 @@ function describeExtras(config: InstallConfig): string {
     config.nvidia_driver === "nvidia-open" && "NVIDIA driver",
     config.fingerprint && "fingerprint login",
     config.secure_boot && "Secure Boot",
+    config.cockpit && "Cockpit",
+    config.netdata && "Netdata",
+    config.fail2ban && "fail2ban",
+    config.update_downloads && "daily update downloads",
+    config.serial_console && "serial console",
   ].filter(Boolean)
   return extras.length > 0 ? extras.join(", ") : "None"
 }
@@ -153,6 +159,11 @@ export function ReviewScreen({
     ["Mirrors", config.mirror_country || "Automatic"],
     ["Kernel headers", config.kernel_headers ? "Yes" : "No"],
   ]
+  if (plan.persona === "server") {
+    const keys = config.ssh_authorized_keys.length
+    rows.push(["SSH", `Key-only login, ${keys} authorized key${keys === 1 ? "" : "s"}; firewall on`])
+    rows.push(["Network", describeNetwork(config)])
+  }
   if (hardware) {
     rows.push([
       "Hardware",
