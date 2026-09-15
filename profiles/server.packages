@@ -1,0 +1,10 @@
+# Server persona: headless system managed over SSH.
+openssh
+firewalld
+man-db
+bash-completion
+curl
+rsync
+htop
+tmux
+smartmontools

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from .hardware import FeatureSupport, HardwareProfile
+from .server import SERVER_PERSONA
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +38,16 @@ def offered_features(
         offers.append(
             FeatureOffer("snapshots", "System snapshots", f"snapper before/after package changes{rollback}", True)
         )
+    if persona == SERVER_PERSONA:
+        # Desktop and client-hardware extras don't apply to a headless server.
+        offers += [
+            FeatureOffer("cockpit", "Cockpit", "web admin console on port 9090", False),
+            FeatureOffer("netdata", "Netdata", "live monitoring dashboard on port 19999", False),
+            FeatureOffer("fail2ban", "fail2ban", "ban addresses after repeated failed SSH logins", False),
+            FeatureOffer("update_downloads", "Update downloads", "fetch updates daily; install them yourself", False),
+            FeatureOffer("serial_console", "Serial console", "login and boot messages on ttyS0 (115200 baud)", False),
+        ]
+        return offers
     offers.append(FeatureOffer("flatpak", "Flatpak", "apps from Flathub, also in Discover", persona != "minimal"))
     offers.append(
         FeatureOffer("gaming_tweaks", "Gaming tweaks", "GameMode for all users, no split-lock slowdown", persona == "gamer")
@@ -70,4 +81,9 @@ def feature_settings(chosen: Iterable[str]) -> dict[str, object]:
         "fingerprint": "fingerprint" in keys,
         "tpm2_unlock": "tpm2_unlock" in keys,
         "secure_boot": "secure_boot" in keys,
+        "cockpit": "cockpit" in keys,
+        "netdata": "netdata" in keys,
+        "fail2ban": "fail2ban" in keys,
+        "update_downloads": "update_downloads" in keys,
+        "serial_console": "serial_console" in keys,
     }

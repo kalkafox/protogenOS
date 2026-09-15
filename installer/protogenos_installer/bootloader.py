@@ -82,6 +82,7 @@ def kernel_cmdline(
     tpm2: bool = False,
     systemd_initramfs: bool = True,
     zram: bool = False,
+    serial_console: bool = False,
     include_root: bool = True,
 ) -> str:
     """Full command line for loaders that don't generate one (systemd-boot, Limine).
@@ -105,6 +106,9 @@ def kernel_cmdline(
     if zram:
         # zswap in front of zram swap just double-compresses pages.
         parameters.append("zswap.enabled=0")
+    if serial_console:
+        # The last console= becomes /dev/console, so boot messages reach serial.
+        parameters += ["console=tty0", "console=ttyS0,115200"]
     return " ".join(parameters)
 
 

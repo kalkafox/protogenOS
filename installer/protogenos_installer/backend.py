@@ -34,6 +34,20 @@ from .network import (
     networkmanager_keyfile,
     read_iwd_credentials,
 )
+from .server import (
+    FAIL2BAN_JAIL,
+    GRUB_SERIAL_COMMAND,
+    SERVER_ONLY_SETTINGS,
+    SERVER_PERSONA,
+    SSH_KEY_PATTERN,
+    SSHD_CONFIG,
+    UPDATE_DOWNLOAD_SERVICE,
+    UPDATE_DOWNLOAD_TIMER,
+    ServerConfigError,
+    firewall_services,
+    static_connection_keyfile,
+    validate_static_network,
+)
 from .storage import (
     FILESYSTEM_PACKAGES,
     FILESYSTEM_TOOLS,
@@ -173,6 +187,17 @@ class InstallConfig:
     fingerprint: bool = False
     tpm2_unlock: bool = False
     secure_boot: bool = False
+    # Server persona only: key-only SSH, optional services, static networking.
+    ssh_authorized_keys: tuple[str, ...] = ()
+    cockpit: bool = False
+    netdata: bool = False
+    fail2ban: bool = False
+    update_downloads: bool = False
+    serial_console: bool = False
+    static_address: str = ""
+    static_gateway: str = ""
+    static_dns: tuple[str, ...] = ()
+    static_interface: str = ""
 
     def __post_init__(self) -> None:
         # JSON callers (web API, config files) pass users as plain objects.
@@ -181,6 +206,11 @@ class InstallConfig:
             for user in (self.additional_users or ())
         )
         object.__setattr__(self, "additional_users", users)
+        # ...and lists where the dataclass expects tuples.
+        for name in ("ssh_authorized_keys", "static_dns"):
+            value = getattr(self, name)
+            if isinstance(value, list):
+                object.__setattr__(self, name, tuple(value))
 
     def validate(self, zoneinfo_root: Path = Path("/usr/share/zoneinfo")) -> None:
         if not self.disk.startswith("/dev/") or not Path(self.disk).name:
@@ -189,7 +219,10 @@ class InstallConfig:
             raise InstallError("firmware must be 'uefi' or 'bios'")
         if self.filesystem not in FILESYSTEMS:
             raise InstallError(f"filesystem must be one of: {', '.join(FILESYSTEMS)}")
-        for name in ("btrfs_subvolumes", "snapshots", "flatpak", "gaming_tweaks", "fingerprint", "tpm2_unlock", "secure_boot"):
+        for name in (
+            "btrfs_subvolumes", "snapshots", "flatpak", "gaming_tweaks", "fingerprint", "tpm2_unlock",
+            "secure_boot", "cockpit", "netdata", "fail2ban", "update_downloads", "serial_console",
+        ):
             if not isinstance(getattr(self, name), bool):
                 raise InstallError(f"{name} must be true or false")
         if not HOSTNAME_PATTERN.fullmatch(self.hostname):
@@ -226,6 +259,34 @@ class InstallConfig:
         if self.mirror_country and not COUNTRY_PATTERN.fullmatch(self.mirror_country):
             raise InstallError(f"invalid mirror country: {self.mirror_country!r}")
         self._validate_additional_users()
+        self._validate_server_settings()
+
+    def validate_for_persona(self, persona: str) -> None:
+        """Check settings that depend on the chosen persona."""
+        if persona == SERVER_PERSONA:
+            if not self.ssh_authorized_keys:
+                raise InstallError("a server needs at least one SSH public key; password logins are disabled")
+            return
+        for name, off in SERVER_ONLY_SETTINGS.items():
+            if getattr(self, name) != off:
+                raise InstallError(f"{name} is only available for the Server persona")
+
+    def _validate_server_settings(self) -> None:
+        if not isinstance(self.ssh_authorized_keys, tuple) or not all(
+            isinstance(key, str) and SSH_KEY_PATTERN.fullmatch(key) for key in self.ssh_authorized_keys
+        ):
+            raise InstallError("ssh_authorized_keys must be a list of SSH public keys")
+        if not isinstance(self.static_dns, tuple) or not all(isinstance(item, str) for item in self.static_dns):
+            raise InstallError("static_dns must be a list of addresses")
+        for name in ("static_address", "static_gateway", "static_interface"):
+            if not isinstance(getattr(self, name), str):
+                raise InstallError(f"{name} must be a string")
+        try:
+            validate_static_network(
+                self.static_address, self.static_gateway, self.static_dns, self.static_interface
+            )
+        except ServerConfigError as error:
+            raise InstallError(str(error)) from error
 
     def _validate_features(self) -> None:
         if self.snapshots and not (self.filesystem == "btrfs" and self.btrfs_subvolumes):
@@ -651,6 +712,7 @@ class InstallerBackend:
         is still mounted (the CLI uses it to offer a chroot shell).
         """
         config.validate(self.zoneinfo_root)
+        config.validate_for_persona(plan.persona)
         self._step_index = 0
         self._step_total = 7 if plan.aur_packages else 6
         self.warnings = []
@@ -682,6 +744,8 @@ class InstallerBackend:
             self._step("Configuring the system")
             self._configure_system(plan, config, hardware)
             self._copy_network_config()
+            if plan.persona == SERVER_PERSONA:
+                self._configure_server(plan, config)
 
             self._step("Installing the bootloader")
             # Bootloader goes before optional AUR builds so a failed build
@@ -927,6 +991,19 @@ class InstallerBackend:
             packages.append("tpm2-tss")
         if config.secure_boot:
             packages.append("sbctl")
+        if "docker" in plan.selections.get("container", ()):
+            packages.append("docker-compose")
+        if config.cockpit:
+            packages.append("cockpit")
+            if "podman" in plan.selections.get("container", ()):
+                packages.append("cockpit-podman")
+        if config.netdata:
+            packages.append("netdata")
+        if config.fail2ban:
+            packages.append("fail2ban")
+        if config.update_downloads:
+            # checkupdates needs fakeroot to sync its private database copy.
+            packages.extend(("pacman-contrib", "fakeroot"))
         return packages
 
     def _write_fstab(self) -> None:
@@ -969,6 +1046,8 @@ class InstallerBackend:
         self._create_users(config)
         self._configure_features(plan, config)
         self._enable_services(hardware, desktop=plan.desktop)
+        if config.serial_console:
+            self._chroot("systemctl", "enable", "serial-getty@ttyS0.service")
 
     def _configure_features(self, plan: InstallPlan, config: InstallConfig) -> None:
         if config.snapshots:
@@ -1086,6 +1165,62 @@ class InstallerBackend:
             path.write_text(networkmanager_keyfile(credential))
             self.runner.emit(f"Saved Wi-Fi network {credential.ssid!r} for the installed system")
 
+    def _configure_server(self, plan: InstallPlan, config: InstallConfig) -> None:
+        """SSH, firewall, and optional services for the Server persona."""
+        self._write_target("etc/ssh/sshd_config.d/10-protogenos.conf", SSHD_CONFIG)
+        self._install_authorized_keys(config)
+        for service in firewall_services(cockpit=config.cockpit, netdata=config.netdata):
+            opened = self.runner.run(
+                [
+                    "arch-chroot",
+                    str(self.target_root),
+                    "firewall-offline-cmd",
+                    "--zone=public",
+                    f"--add-service={service}",
+                ],
+                check=False,
+            )
+            if opened.returncode != 0:
+                self._warn(f"could not open the {service} firewall service; run 'sudo firewall-cmd --permanent --add-service={service}'")
+        if config.fail2ban:
+            self._write_target("etc/fail2ban/jail.d/10-protogenos.local", FAIL2BAN_JAIL)
+        if config.update_downloads:
+            self._write_target("etc/systemd/system/protogenos-download-updates.service", UPDATE_DOWNLOAD_SERVICE)
+            self._write_target("etc/systemd/system/protogenos-download-updates.timer", UPDATE_DOWNLOAD_TIMER)
+        if config.static_address:
+            path = self.target_root / "etc/NetworkManager/system-connections/protogenos-static.nmconnection"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch(mode=0o600, exist_ok=True)
+            path.chmod(0o600)
+            path.write_text(
+                static_connection_keyfile(
+                    config.static_address, config.static_gateway, config.static_dns, config.static_interface
+                )
+            )
+        if "docker" in plan.selections.get("container", ()):
+            # docker group membership is root-equivalent; only the administrator gets it.
+            self._chroot("usermod", "--append", "--groups", "docker", config.username)
+
+        services = ["sshd.service", "firewalld.service"]
+        if "docker" in plan.selections.get("container", ()):
+            services.append("docker.service")
+        if config.cockpit:
+            services.append("cockpit.socket")
+        if config.netdata:
+            services.append("netdata.service")
+        if config.fail2ban:
+            services.append("fail2ban.service")
+        if config.update_downloads:
+            services.append("protogenos-download-updates.timer")
+        self._chroot("systemctl", "enable", *services)
+
+    def _install_authorized_keys(self, config: InstallConfig) -> None:
+        ssh_dir = f"/home/{config.username}/.ssh"
+        self._write_target(f"home/{config.username}/.ssh/authorized_keys", "\n".join(config.ssh_authorized_keys) + "\n")
+        self._chroot("chmod", "700", ssh_dir)
+        self._chroot("chmod", "600", f"{ssh_dir}/authorized_keys")
+        self._chroot("chown", "-R", f"{config.username}:{config.username}", ssh_dir)
+
     def _copy_install_log(self) -> None:
         log_path = getattr(self.runner, "log_path", None)
         if log_path is None or not Path(log_path).is_file():
@@ -1125,6 +1260,7 @@ class InstallerBackend:
             tpm2=config.tpm2_unlock,
             systemd_initramfs=systemd_initramfs,
             zram=config.swap == "zram",
+            serial_console=config.serial_console,
             include_root=include_root,
         )
 
@@ -1202,6 +1338,10 @@ class InstallerBackend:
         if config.disk_layout != "erase":
             # Find Windows or other installed systems for dual boot.
             content = boot.set_shell_variable(content, "GRUB_DISABLE_OS_PROBER", "false")
+        if config.serial_console:
+            content = boot.set_shell_variable(content, "GRUB_TERMINAL_INPUT", "console serial")
+            content = boot.set_shell_variable(content, "GRUB_TERMINAL_OUTPUT", "console serial")
+            content = boot.set_shell_variable(content, "GRUB_SERIAL_COMMAND", GRUB_SERIAL_COMMAND)
         path.write_text(content)
 
         if config.firmware == "uefi":

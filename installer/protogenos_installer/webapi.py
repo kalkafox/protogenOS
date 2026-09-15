@@ -34,6 +34,7 @@ from .locales import suggest_locale
 from .logshare import LogShareError, log_tail, upload_log
 from .keyboard import LAYOUT_PATTERN, VARIANT_PATTERN, console_keymap, list_layouts
 from .mirrors import parse_reflector_countries
+from .server import ServerConfigError, fetch_github_keys
 from .storage import StorageError, read_disk_layout
 from .models import OptionGroup, PackageChoice
 from .network import IwdClient, NetworkError, is_online
@@ -43,6 +44,7 @@ from .profiles import PERSONAS, ProfileError, ProfileRepository
 def _serialize_choice(choice: PackageChoice) -> dict[str, Any]:
     data = asdict(choice)
     data["profiles"] = sorted(choice.profiles)
+    data["default_profiles"] = sorted(choice.default_profiles)
     return data
 
 
@@ -141,6 +143,7 @@ def make_handler(
     log_path: Path | None = None,
     keyboard_state: Path | None = None,
     log_uploader: Callable[[bytes], str] = upload_log,
+    github_keys: Callable[[str], tuple[str, ...]] = fetch_github_keys,
 ) -> type[BaseHTTPRequestHandler]:
     repository = ProfileRepository(profiles_dir)
     wifi_client = wifi_client or IwdClient()
@@ -246,6 +249,8 @@ def make_handler(
                         HTTPStatus.OK,
                         {"locale": suggest_locale(query.get("timezone", "UTC"), query.get("layout", ""))},
                     )
+                elif path == "/api/ssh/github-keys" and method == "GET":
+                    self._send_json(HTTPStatus.OK, {"keys": list(github_keys(query.get("username", "")))})
                 elif path == "/api/config/validate" and method == "POST":
                     self._handle_validate()
                 elif path == "/api/install/start" and method == "POST":
@@ -260,7 +265,7 @@ def make_handler(
                     raise ApiError(HTTPStatus.NOT_FOUND, "not found")
             except ApiError as error:
                 self._send_json(error.status, {"error": error.message})
-            except (ProfileError, InstallError, NetworkError, StorageError) as error:
+            except (ProfileError, InstallError, NetworkError, StorageError, ServerConfigError) as error:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
 
         def _handle_options(self, query: dict[str, str]) -> None:
@@ -293,6 +298,8 @@ def make_handler(
 
         def _handle_validate(self) -> None:
             body = self._read_json()
+            # Optional: also check settings that depend on the persona.
+            persona = body.pop("persona", None)
             try:
                 config = InstallConfig(**body)
             except TypeError as error:
@@ -300,6 +307,8 @@ def make_handler(
                 return
             try:
                 config.validate()
+                if isinstance(persona, str):
+                    config.validate_for_persona(persona)
             except InstallError as error:
                 self._send_json(HTTPStatus.OK, {"valid": False, "error": str(error)})
                 return
@@ -506,6 +515,7 @@ def create_server(
     log_path: Path | None = None,
     keyboard_state: Path | None = None,
     log_uploader: Callable[[bytes], str] = upload_log,
+    github_keys: Callable[[str], tuple[str, ...]] = fetch_github_keys,
 ) -> ThreadingHTTPServer:
     handler = make_handler(
         profiles_dir=profiles_dir,
@@ -517,6 +527,7 @@ def create_server(
         log_path=log_path,
         keyboard_state=keyboard_state,
         log_uploader=log_uploader,
+        github_keys=github_keys,
     )
     return ThreadingHTTPServer((host, port), handler)
 

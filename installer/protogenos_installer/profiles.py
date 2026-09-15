@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import dataclasses
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
-from .models import InstallPlan, OptionGroup, PackageChoice
+from .models import HEADLESS_PERSONAS, InstallPlan, OptionGroup, PackageChoice
 
-PERSONAS = ("general", "gamer", "developer", "minimal")
+PERSONAS = ("general", "gamer", "developer", "server", "minimal")
 SELECTION_TYPES = {"one-of", "any-of", "optional"}
 PACKAGE_SOURCES = {"official", "aur", "future"}
 PACKAGE_PATTERN = re.compile(r"^[A-Za-z0-9@._+:-]+$")
@@ -47,11 +48,19 @@ def load_options(path: Path) -> tuple[PackageChoice, ...]:
             raise ProfileError(f"{path}:{line_number}: invalid selection type {selection!r}")
         if source not in PACKAGE_SOURCES:
             raise ProfileError(f"{path}:{line_number}: invalid source {source!r}")
-        if default not in {"yes", "no"}:
-            raise ProfileError(f"{path}:{line_number}: default must be yes or no")
         profile_set = frozenset(item.strip() for item in profiles.split(",") if item.strip())
         if not profile_set or not profile_set.issubset(PERSONAS):
             raise ProfileError(f"{path}:{line_number}: invalid profile list {profiles!r}")
+        if default == "yes":
+            default_set = profile_set
+        elif default == "no":
+            default_set = frozenset()
+        else:
+            default_set = frozenset(item.strip() for item in default.split(",") if item.strip())
+            if not default_set or not default_set.issubset(profile_set):
+                raise ProfileError(
+                    f"{path}:{line_number}: default must be yes, no, or a subset of the profile list"
+                )
         if not PACKAGE_PATTERN.fullmatch(package):
             raise ProfileError(f"{path}:{line_number}: invalid package {package!r}")
         key = (group, identifier)
@@ -66,8 +75,9 @@ def load_options(path: Path) -> tuple[PackageChoice, ...]:
                 label=label,
                 package=package,
                 source=source,
-                default=default == "yes",
+                default=bool(default_set),
                 profiles=profile_set,
+                default_profiles=default_set,
             )
         )
 
@@ -89,7 +99,8 @@ class ProfileRepository:
         grouped: dict[str, list[PackageChoice]] = {}
         for choice in self._choices:
             if persona in choice.profiles:
-                grouped.setdefault(choice.group, []).append(choice)
+                resolved = dataclasses.replace(choice, default=persona in choice.default_profiles)
+                grouped.setdefault(choice.group, []).append(resolved)
         return tuple(
             OptionGroup(name=name, selection=choices[0].selection, choices=tuple(choices))
             for name, choices in grouped.items()
@@ -108,8 +119,8 @@ class ProfileRepository:
             raise ProfileError(f"unknown option groups: {', '.join(sorted(unknown_groups))}")
 
         packages: list[str] = list(load_package_manifest(self.root / "base.packages"))
-        # Minimal is console-only: no desktop and no General Use layer.
-        if persona != "minimal":
+        # Minimal and Server are console-only: no desktop and no General Use layer.
+        if persona not in HEADLESS_PERSONAS:
             packages.extend(load_package_manifest(self.root / "desktop.packages"))
             packages.extend(load_package_manifest(self.root / "general.packages"))
         if persona != "general":

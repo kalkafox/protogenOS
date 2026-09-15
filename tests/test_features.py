@@ -44,6 +44,22 @@ class FeatureOfferTests(unittest.TestCase):
         self.assertFalse(offers["tpm2_unlock"].default)
         self.assertIn("enrolls keys now", offers["secure_boot"].detail)
 
+    def test_server_offers_services_instead_of_desktop_extras(self) -> None:
+        offers = _offers(
+            "server",
+            encrypt=True,
+            bootloader="systemd-boot",
+            hardware=HardwareProfile(nvidia_open_supported=True),
+            support=FeatureSupport(tpm2=True, fingerprint_reader=True),
+        )
+        self.assertEqual(
+            list(offers),
+            ["snapshots", "cockpit", "netdata", "fail2ban", "update_downloads", "serial_console"],
+        )
+        self.assertTrue(offers["snapshots"].default)
+        self.assertFalse(any(offer.default for key, offer in offers.items() if key != "snapshots"))
+        self.assertNotIn("cockpit", _offers("minimal"))
+
     def test_snapshots_need_btrfs_subvolumes(self) -> None:
         self.assertNotIn("snapshots", _offers(btrfs_subvolumes=False))
         self.assertNotIn("snapshots", _offers(filesystem="ext4"))
@@ -54,6 +70,9 @@ class FeatureOfferTests(unittest.TestCase):
         self.assertTrue(settings["secure_boot"])
         self.assertFalse(settings["snapshots"])
         self.assertEqual(feature_settings([])["nvidia_driver"], "nouveau")
+        server = feature_settings(["cockpit", "serial_console"])
+        self.assertTrue(server["cockpit"] and server["serial_console"])
+        self.assertFalse(server["fail2ban"])
 
 
 if __name__ == "__main__":

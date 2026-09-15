@@ -50,7 +50,7 @@ class WebApiTests(unittest.TestCase):
     def test_personas(self) -> None:
         status, payload = _request(f"{self.base_url}/api/personas")
         self.assertEqual(status, 200)
-        self.assertEqual(payload["personas"], ["general", "gamer", "developer", "minimal"])
+        self.assertEqual(payload["personas"], ["general", "gamer", "developer", "server", "minimal"])
 
     def test_system_reports_detected_firmware(self) -> None:
         status, payload = _request(f"{self.base_url}/api/system")
@@ -193,6 +193,48 @@ class WebApiTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertFalse(payload["valid"])
+
+    def test_config_validate_checks_persona_settings(self) -> None:
+        body = {
+            "disk": "/dev/sda",
+            "firmware": "uefi",
+            "hostname": "proto-box",
+            "username": "fox",
+            "user_password": "hunter2",
+            "timezone": "UTC",
+        }
+        status, payload = _request(f"{self.base_url}/api/config/validate", method="POST", body={**body, "persona": "server"})
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["valid"])
+        self.assertIn("SSH public key", payload["error"])
+
+    def test_github_keys_route(self) -> None:
+        from protogenos_installer.server import ServerConfigError
+
+        def fake_keys(username: str) -> tuple[str, ...]:
+            if username == "fox":
+                return ("ssh-ed25519 AAAAC3Nz fox",)
+            raise ServerConfigError(f"GitHub user {username} was not found")
+
+        server = create_server(
+            profiles_dir=Path(__file__).resolve().parents[1] / "profiles",
+            dist_dir=self.dist_dir,
+            session=self.session,
+            github_keys=fake_keys,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host, port = server.server_address[:2]
+        try:
+            status, payload = _request(f"http://{host}:{port}/api/ssh/github-keys?username=fox")
+            self.assertEqual((status, payload), (200, {"keys": ["ssh-ed25519 AAAAC3Nz fox"]}))
+            status, payload = _request(f"http://{host}:{port}/api/ssh/github-keys?username=ghost")
+            self.assertEqual(status, 400)
+            self.assertIn("was not found", payload["error"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
     def test_static_serves_index_for_unknown_paths(self) -> None:
         with urllib.request.urlopen(f"{self.base_url}/some/spa/route") as response:

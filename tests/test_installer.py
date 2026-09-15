@@ -473,6 +473,118 @@ class InstallerBackendTests(unittest.TestCase):
         self.assertFalse((self.target / "etc/X11/xorg.conf.d/00-keyboard.conf").exists())
         self.assertTrue((self.target / "etc/vconsole.conf").exists())
 
+    SERVER_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKexampleKeyMaterial fox@den"
+
+    def _server_plan(self, container: tuple[str, ...] = ("podman",)) -> InstallPlan:
+        return InstallPlan(
+            persona="server",
+            packages=("base", "linux-firmware", "networkmanager", "openssh", "firewalld", "linux-lts", *container),
+            selections={"kernel": ("linux-lts",), "container": container},
+            aur_packages=(),
+            multilib_required=False,
+        )
+
+    def _enabled_units(self, runner: FakeRunner) -> set[str]:
+        return {
+            unit
+            for command in runner.commands
+            if command[2:4] == ("systemctl", "enable")
+            for unit in command[4:]
+        }
+
+    def test_server_install_locks_ssh_to_keys_behind_a_firewall(self) -> None:
+        runner = FakeRunner()
+        self._backend(runner).install(
+            self._server_plan(), self._config(ssh_authorized_keys=(self.SERVER_KEY,))
+        )
+        sshd = (self.target / "etc/ssh/sshd_config.d/10-protogenos.conf").read_text()
+        self.assertIn("PasswordAuthentication no", sshd)
+        self.assertIn("PermitRootLogin no", sshd)
+        keys = self.target / "home/fox/.ssh/authorized_keys"
+        self.assertEqual(keys.read_text(), self.SERVER_KEY + "\n")
+        self.assertIn(("arch-chroot", str(self.target), "chmod", "600", "/home/fox/.ssh/authorized_keys"), runner.commands)
+        self.assertIn(("arch-chroot", str(self.target), "chown", "-R", "fox:fox", "/home/fox/.ssh"), runner.commands)
+        units = self._enabled_units(runner)
+        self.assertTrue({"sshd.service", "firewalld.service", "NetworkManager.service"} <= units)
+        self.assertNotIn("plasmalogin.service", units)
+        for unit in ("cockpit.socket", "netdata.service", "fail2ban.service", "docker.service", "serial-getty@ttyS0.service"):
+            self.assertNotIn(unit, units)
+        self.assertFalse(any("firewall-offline-cmd" in command for command in runner.commands))
+        pacstrap = next(command for command in runner.commands if command[0] == "pacstrap")
+        self.assertNotIn("cockpit", pacstrap)
+        self.assertNotIn("docker-compose", pacstrap)
+
+    def test_server_requires_an_ssh_key(self) -> None:
+        runner = FakeRunner()
+        with self.assertRaisesRegex(InstallError, "at least one SSH public key"):
+            self._backend(runner).install(self._server_plan(), self._config())
+        self.assertEqual(runner.commands, [])
+
+    def test_server_settings_are_rejected_for_other_personas(self) -> None:
+        for overrides in ({"cockpit": True}, {"ssh_authorized_keys": (self.SERVER_KEY,)}, {"static_address": "10.0.0.2/24"}):
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(InstallError, "only available for the Server"):
+                self._backend(FakeRunner()).install(self._plan(), self._config(**overrides))
+
+    def test_server_optional_services_open_ports_and_start(self) -> None:
+        runner = FakeRunner()
+        self._backend(runner).install(
+            self._server_plan(("podman", "docker")),
+            self._config(
+                ssh_authorized_keys=(self.SERVER_KEY,),
+                cockpit=True,
+                netdata=True,
+                fail2ban=True,
+                update_downloads=True,
+            ),
+        )
+        pacstrap = next(command for command in runner.commands if command[0] == "pacstrap")
+        for package in ("cockpit", "cockpit-podman", "netdata", "fail2ban", "pacman-contrib", "fakeroot", "docker-compose"):
+            self.assertIn(package, pacstrap)
+        for service in ("cockpit", "netdata-dashboard"):
+            self.assertIn(
+                ("arch-chroot", str(self.target), "firewall-offline-cmd", "--zone=public", f"--add-service={service}"),
+                runner.commands,
+            )
+        units = self._enabled_units(runner)
+        for unit in ("cockpit.socket", "netdata.service", "fail2ban.service", "docker.service", "protogenos-download-updates.timer"):
+            self.assertIn(unit, units)
+        self.assertIn(("arch-chroot", str(self.target), "usermod", "--append", "--groups", "docker", "fox"), runner.commands)
+        self.assertIn("backend = systemd", (self.target / "etc/fail2ban/jail.d/10-protogenos.local").read_text())
+        service = (self.target / "etc/systemd/system/protogenos-download-updates.service").read_text()
+        self.assertIn("ExecStart=/usr/bin/checkupdates --download", service)
+        self.assertIn("SuccessExitStatus=2", service)
+        self.assertTrue((self.target / "etc/systemd/system/protogenos-download-updates.timer").is_file())
+
+    def test_server_static_address_and_serial_console(self) -> None:
+        runner = FakeRunner()
+        self._backend(runner).install(
+            self._server_plan(),
+            self._config(
+                ssh_authorized_keys=(self.SERVER_KEY,),
+                serial_console=True,
+                static_address="192.168.1.10/24",
+                static_gateway="192.168.1.1",
+                static_dns=("1.1.1.1",),
+            ),
+        )
+        keyfile = self.target / "etc/NetworkManager/system-connections/protogenos-static.nmconnection"
+        self.assertIn("address1=192.168.1.10/24,192.168.1.1", keyfile.read_text())
+        self.assertEqual(keyfile.stat().st_mode & 0o777, 0o600)
+        grub = (self.target / "etc/default/grub").read_text()
+        self.assertIn("console=tty0 console=ttyS0,115200", grub)
+        self.assertIn("GRUB_TERMINAL_OUTPUT='console serial'", grub)
+        self.assertIn("serial-getty@ttyS0.service", self._enabled_units(runner))
+
+    def test_server_rejects_invalid_static_settings_and_keys(self) -> None:
+        with self.assertRaisesRegex(InstallError, "prefix length"):
+            self._config(static_address="192.168.1.10").validate(self.zoneinfo)
+        with self.assertRaisesRegex(InstallError, "list of SSH public keys"):
+            self._config(ssh_authorized_keys=("not a key",)).validate(self.zoneinfo)
+        # JSON lists become tuples.
+        config = self._config(ssh_authorized_keys=[self.SERVER_KEY], static_dns=["1.1.1.1"], static_address="10.0.0.2/8")
+        config.validate(self.zoneinfo)
+        self.assertEqual(config.static_dns, ("1.1.1.1",))
+
     def test_keyring_is_refreshed_before_pacstrap(self) -> None:
         runner = FakeRunner()
         self._backend(runner).install(self._plan(), self._config())
