@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+build_root="$(mktemp -d /tmp/protogenos-lxc.XXXXXXXX)"
+rootfs="${build_root}/rootfs"
+build_date="$(date --utc --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y%m%d)"
+template_name="protogenos-server_${build_date}-1_amd64.tar.zst"
+output_dir="${PROTOGENOS_OUTPUT_DIR:-${project_root}/out}"
+
+build_root_mounts() {
+    findmnt -rn -o TARGET | grep -F -- "${build_root}/" | sort -r || true
+}
+
+cleanup() {
+    [[ "${build_root}" == /tmp/protogenos-lxc.* ]] || return 0
+
+    # An interrupted pacstrap leaves /proc, /sys and the host's /dev mounted
+    # inside the root. Deleting through them would damage the host.
+    local mountpoint
+    while IFS= read -r mountpoint; do
+        umount --lazy -- "${mountpoint}" || true
+    done < <(build_root_mounts)
+    if [[ -n "$(build_root_mounts)" ]]; then
+        echo "Leaving ${build_root} in place: filesystems are still mounted under it." >&2
+        return 0
+    fi
+    rm -rf --one-file-system -- "${build_root}"
+}
+trap cleanup EXIT
+
+sed -i 's/^#\?ParallelDownloads = .*/ParallelDownloads = 15/' /etc/pacman.conf
+pacman -Syu --noconfirm --needed arch-install-scripts archlinux-keyring zstd
+
+packages=()
+while IFS= read -r line; do
+    line="${line%%#*}"
+    line="${line//[[:space:]]/}"
+    [[ -n "${line}" ]] && packages+=("${line}")
+done < "${project_root}/config/lxc.packages"
+
+# The archlinux Docker image skips man pages, locales and even
+# /etc/pacman.conf through NoExtract. Those belong in a real system.
+grep -v '^NoExtract' /etc/pacman.conf > "${build_root}/pacman.conf"
+
+mkdir -p "${rootfs}"
+# -c: use the (bind-mounted) builder cache, so the image ships no packages.
+# -G: do not copy the builder's keyring; each container creates its own.
+pacstrap -C "${build_root}/pacman.conf" -c -G "${rootfs}" "${packages[@]}"
+
+# Project-owned files, owned by root regardless of who checked out the repo.
+tar -C "${project_root}/overlays/lxc" --owner=0 --group=0 -cf - . \
+    | tar -C "${rootfs}" --no-overwrite-dir -xf -
+
+fetch_assets="${project_root}/installer/protogenos_installer/assets/fetch"
+install -Dm644 "${fetch_assets}/fastfetch-logo.txt" "${rootfs}/usr/share/protogenos/fastfetch-logo.txt"
+install -Dm644 "${fetch_assets}/fastfetch.jsonc" "${rootfs}/etc/xdg/fastfetch/config.jsonc"
+
+# Same release metadata the installer writes, with an LXC variant.
+cat > "${rootfs}/usr/lib/os-release" <<'OS_RELEASE'
+NAME="protogenOS"
+PRETTY_NAME="protogenOS"
+ID=protogenos
+ID_LIKE=arch
+BUILD_ID=rolling
+VARIANT="LXC"
+VARIANT_ID=lxc
+ANSI_COLOR="38;2;213;31;61"
+LOGO=protogenos
+HOME_URL="https://github.com/kalkafox/protogenOS"
+BUG_REPORT_URL="https://github.com/kalkafox/protogenOS/issues"
+OS_RELEASE
+
+for script in bash-prompt nesting-check; do
+    hook="[[ -r /usr/share/protogenos/${script}.sh ]] && . /usr/share/protogenos/${script}.sh"
+    if ! grep -qxF "${hook}" "${rootfs}/etc/bash.bashrc"; then
+        printf '\n%s\n' "${hook}" >> "${rootfs}/etc/bash.bashrc"
+    fi
+done
+
+# Pacman's download sandbox (Landlock and seccomp) fails inside Proxmox
+# containers, so every download errors out unless it is turned off.
+sed -i -e 's/^#\?DisableSandboxFilesystem$/DisableSandboxFilesystem/' \
+    -e 's/^#\?DisableSandboxSyscalls$/DisableSandboxSyscalls/' "${rootfs}/etc/pacman.conf"
+
+# vim does not provide vi. Link it outside /usr/bin so installing the vi
+# package later does not conflict.
+ln -sf ../../bin/vim "${rootfs}/usr/local/bin/vi"
+
+sed -i 's/^#\s*en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' "${rootfs}/etc/locale.gen"
+arch-chroot "${rootfs}" locale-gen
+printf 'LANG=en_US.UTF-8\n' > "${rootfs}/etc/locale.conf"
+ln -sf ../usr/share/zoneinfo/UTC "${rootfs}/etc/localtime"
+
+# Proxmox's archlinux setup writes /etc/systemd/network/eth0.network,
+# /etc/hostname and /etc/resolv.conf when the container is created.
+systemctl --root="${rootfs}" enable \
+    systemd-networkd.service \
+    sshd.service \
+    docker.service \
+    protogenos-pacman-init.service
+
+# The empty machine-id makes the first boot of every container a systemd
+# first boot. systemd-firstboot would then wait on the console for any
+# setting Proxmox did not write (the timezone, unless one was chosen), holding
+# up every other unit, sshd included. Proxmox provisions the container instead.
+systemctl --root="${rootfs}" mask systemd-firstboot.service
+# Kernel filesystems and the audit socket that an unprivileged container
+# cannot use; left enabled they fail on every boot, as in Arch's own template.
+systemctl --root="${rootfs}" mask \
+    sys-kernel-config.mount \
+    sys-kernel-debug.mount \
+    systemd-journald-audit.socket
+
+# Strip per-machine state so every container created from the template is
+# unique: systemd makes a machine-id, sshdgenkeys makes host keys, and
+# protogenos-pacman-init makes a keyring on first boot.
+rm -rf -- "${rootfs}/etc/pacman.d/gnupg"
+rm -f -- "${rootfs}"/etc/ssh/ssh_host_* "${rootfs}/etc/hostname" \
+    "${rootfs}/var/lib/systemd/random-seed" "${rootfs}/root/.bash_history"
+: > "${rootfs}/etc/machine-id"
+find "${rootfs}/var/cache/pacman/pkg" "${rootfs}/var/log" -mindepth 1 -type f -delete
+
+# Fail the build rather than ship a template that cannot work in a container.
+for unexpected in "${rootfs}"/boot/vmlinuz-* "${rootfs}/usr/lib/systemd/system/NetworkManager.service"; do
+    if [[ -e "${unexpected}" ]]; then
+        echo "Template must not contain ${unexpected#"${rootfs}"}." >&2
+        exit 1
+    fi
+done
+for unit in multi-user.target.wants/sshd.service multi-user.target.wants/docker.service \
+    multi-user.target.wants/systemd-networkd.service multi-user.target.wants/protogenos-pacman-init.service; do
+    if [[ ! -L "${rootfs}/etc/systemd/system/${unit}" ]]; then
+        echo "Template is missing enabled unit ${unit}." >&2
+        exit 1
+    fi
+done
+for required in etc/pacman.conf etc/pacman.d/mirrorlist usr/share/man/man8/pacman.8.gz; do
+    if [[ ! -e "${rootfs}/${required}" ]]; then
+        echo "Template is missing /${required}." >&2
+        exit 1
+    fi
+done
+for setting in DisableSandboxFilesystem DisableSandboxSyscalls; do
+    if ! grep -qx "${setting}" "${rootfs}/etc/pacman.conf"; then
+        echo "Template /etc/pacman.conf does not set ${setting}." >&2
+        exit 1
+    fi
+done
+for editor in usr/bin/nano usr/bin/vim; do
+    if [[ ! -x "${rootfs}/${editor}" ]]; then
+        echo "Template is missing /${editor}." >&2
+        exit 1
+    fi
+done
+if [[ "$(readlink -f "${rootfs}/usr/local/bin/vi")" != "${rootfs}/usr/bin/vim" ]]; then
+    echo "Template /usr/local/bin/vi does not point to vim." >&2
+    exit 1
+fi
+for unit in systemd-firstboot.service sys-kernel-config.mount sys-kernel-debug.mount \
+    systemd-journald-audit.socket; do
+    if [[ "$(readlink "${rootfs}/etc/systemd/system/${unit}")" != /dev/null ]]; then
+        echo "Template must mask ${unit}." >&2
+        exit 1
+    fi
+done
+if [[ ! -e "${rootfs}/etc/arch-release" ]]; then
+    # Proxmox detects the archlinux ostype from this file.
+    echo "Template is missing /etc/arch-release." >&2
+    exit 1
+fi
+
+# pacstrap leaves the new root at mode 0555; Proxmox would unpack it as /.
+chmod 0755 "${rootfs}"
+
+mkdir -p "${output_dir}"
+find "${output_dir}" -maxdepth 1 -type f \
+    \( -name 'protogenos-server_*.tar.zst' -o -name 'protogenos-server_*.tar.zst.sha256' \) -delete
+# Keep file capabilities and ACLs; Proxmox restores them when it unpacks.
+tar --numeric-owner --xattrs --xattrs-include='*' --acls \
+    -C "${rootfs}" -cf - . \
+    | zstd -19 -T0 -q -o "${output_dir}/${template_name}"
+(
+    cd "${output_dir}"
+    sha256sum "${template_name}" > "${template_name}.sha256"
+)
+
+if [[ -n "${HOST_UID:-}" && -n "${HOST_GID:-}" ]]; then
+    chown "${HOST_UID}:${HOST_GID}" \
+        "${output_dir}" \
+        "${output_dir}/${template_name}" \
+        "${output_dir}/${template_name}.sha256"
+fi
+
+echo "LXC template written to ${output_dir}/${template_name}"

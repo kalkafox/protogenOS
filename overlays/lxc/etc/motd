@@ -1,0 +1,7 @@
+Welcome to protogenOS — furry-powered and Arch-based.
+
+This is the protogenOS LXC server template. Optional extras:
+  pacman -S cockpit && systemctl enable --now cockpit.socket
+  pacman -S netdata && systemctl enable --now netdata
+  pacman -S fail2ban && systemctl enable --now fail2ban
+More: https://github.com/kalkafox/protogenOS/blob/main/docs/lxc.md

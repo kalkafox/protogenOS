@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+usage() {
+    cat <<'EOF'
+Usage: ./scripts/test-lxc [options]
+
+Create a throwaway unprivileged container from the protogenOS LXC template on
+a Proxmox VE node, check that it works, then destroy it. Runs pct directly by
+default; use --host to drive a node over SSH.
+
+  --host USER@HOST        Proxmox node to test on over SSH (default: this machine)
+  --template PATH         Template to test (default: newest in out/)
+  --vmid ID               Container ID (default: next free ID)
+  --storage NAME          Storage for the root disk (default: local-lvm)
+  --template-storage NAME Storage for container templates (default: local)
+  --bridge NAME           Network bridge (default: vmbr0)
+  --keep                  Keep the container and uploaded template afterwards
+  --dry-run               Print the Proxmox commands without executing them
+  -h, --help              Show this help
+EOF
+}
+
+host=""
+template_path=""
+vmid=""
+storage="local-lvm"
+template_storage="local"
+bridge="vmbr0"
+keep=false
+dry_run=false
+
+while (($#)); do
+    case "$1" in
+        --host) host="${2:?--host requires USER@HOST}"; shift 2 ;;
+        --template) template_path="${2:?--template requires a path}"; shift 2 ;;
+        --vmid) vmid="${2:?--vmid requires an ID}"; shift 2 ;;
+        --storage) storage="${2:?--storage requires a name}"; shift 2 ;;
+        --template-storage) template_storage="${2:?--template-storage requires a name}"; shift 2 ;;
+        --bridge) bridge="${2:?--bridge requires a name}"; shift 2 ;;
+        --keep) keep=true; shift ;;
+        --dry-run) dry_run=true; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+if [[ -z "${template_path}" ]]; then
+    template_path="$(find "${project_root}/out" -maxdepth 1 -type f \
+        -name 'protogenos-server_*.tar.zst' 2>/dev/null | sort | tail -n 1)"
+fi
+[[ -n "${template_path}" && -f "${template_path}" ]] || {
+    echo "No LXC template found; build one with ./scripts/build-lxc or pass --template." >&2
+    exit 1
+}
+[[ -z "${vmid}" || "${vmid}" =~ ^[0-9]+$ ]] || {
+    echo "--vmid must be a number." >&2
+    exit 2
+}
+
+template_name="$(basename -- "${template_path}")"
+volume="${template_storage}:vztmpl/${template_name}"
+
+# Run a command on the Proxmox node, locally or over SSH.
+on_node() {
+    if [[ -n "${host}" ]]; then
+        ssh -o BatchMode=yes -- "${host}" "$(printf '%q ' "$@")"
+    else
+        "$@"
+    fi
+}
+
+# Like on_node, but only prints the command in dry-run mode.
+step() {
+    if [[ "${dry_run}" == true ]]; then
+        printf '%s' "${host:+ssh ${host} }"
+        printf '%q ' "$@"
+        printf '\n'
+    else
+        on_node "$@"
+    fi
+}
+
+in_container() {
+    # A login shell, so PATH matches what a user gets from pct enter or SSH.
+    step pct exec "${vmid}" -- bash -lc "$1"
+}
+
+check() {
+    local description="$1" script="$2"
+    printf '==> %s\n' "${description}"
+    if ! in_container "${script}"; then
+        echo "FAILED: ${description}" >&2
+        failures+=("${description}")
+    fi
+}
+
+created=false
+uploaded=false
+cleanup() {
+    [[ "${keep}" == true || "${dry_run}" == true ]] && return 0
+    if [[ "${created}" == true ]]; then
+        on_node pct stop "${vmid}" >/dev/null 2>&1 || true
+        on_node pct destroy "${vmid}" --purge || echo "Could not destroy container ${vmid}." >&2
+    fi
+    if [[ "${uploaded}" == true ]]; then
+        on_node pvesm free "${volume}" || echo "Could not remove ${volume}." >&2
+    fi
+}
+trap cleanup EXIT
+
+if [[ "${dry_run}" == true ]]; then
+    vmid="${vmid:-<next-free-id>}"
+    template_dest="<path of ${volume}>"
+else
+    if ! on_node command -v pct >/dev/null; then
+        echo "pct was not found${host:+ on ${host}}; is this a Proxmox VE node?" >&2
+        exit 1
+    fi
+    if [[ -z "${vmid}" ]]; then
+        vmid="$(on_node pvesh get /cluster/nextid)"
+    elif on_node pct status "${vmid}" >/dev/null 2>&1; then
+        # Never touch a container this script did not create.
+        echo "Container ${vmid} already exists; choose another --vmid." >&2
+        exit 1
+    fi
+    template_dest="$(on_node pvesm path "${volume}")"
+fi
+
+echo "Uploading ${template_name} to ${volume}"
+if [[ -n "${host}" ]]; then
+    if [[ "${dry_run}" == true ]]; then
+        printf 'scp %q %q\n' "${template_path}" "${host}:${template_dest}"
+    else
+        scp -o BatchMode=yes -- "${template_path}" "${host}:${template_dest}"
+    fi
+else
+    step cp -- "${template_path}" "${template_dest}"
+fi
+uploaded=true
+
+echo "Creating unprivileged container ${vmid}"
+step pct create "${vmid}" "${volume}" \
+    --hostname protogenos-lxc-test \
+    --ostype archlinux \
+    --unprivileged 1 \
+    --features nesting=1,keyctl=1 \
+    --cores 2 \
+    --memory 1024 \
+    --swap 512 \
+    --rootfs "${storage}:8" \
+    --net0 "name=eth0,bridge=${bridge},ip=dhcp,ip6=auto"
+created=true
+step pct start "${vmid}"
+
+failures=()
+check "systemd finishes booting without failed units" '
+    # pct exec can run before systemd accepts connections on its bus.
+    for _ in $(seq 60); do
+        systemctl show --property=Version >/dev/null 2>&1 && break
+        sleep 1
+    done
+    state="$(systemctl is-system-running --wait)"
+    echo "system state: ${state}"
+    [[ "${state}" == running ]] || { systemctl --failed --no-pager; exit 1; }'
+check "os-release identifies protogenOS" '
+    . /etc/os-release && [[ "${ID}" == protogenos && "${VARIANT_ID}" == lxc ]]'
+check "eth0 gets an IPv4 address and DNS resolves" '
+    for _ in $(seq 60); do
+        ip -4 -o addr show dev eth0 scope global | grep -q inet \
+            && getent ahosts archlinux.org >/dev/null && exit 0
+        sleep 1
+    done
+    ip addr; cat /etc/resolv.conf; exit 1'
+check "machine-id and SSH host keys are unique to this container" '
+    [[ -s /etc/machine-id && -s /etc/ssh/ssh_host_ed25519_key ]]'
+check "sshd is enabled, running and accepts root passwords" '
+    systemctl is-enabled --quiet sshd && systemctl is-active --quiet sshd \
+        && sshd -T | grep -qix "permitrootlogin yes" \
+        && sshd -T | grep -qix "passwordauthentication yes"'
+check "no unit waits for input on the console at first boot" '
+    [[ "$(systemctl is-enabled systemd-firstboot.service)" == masked ]] && [[ -e /etc/localtime ]]'
+check "pacman keyring initialized and packages verify" '
+    systemctl is-active --quiet protogenos-pacman-init || { systemctl status protogenos-pacman-init --no-pager; exit 1; }
+    pacman -Sy --noconfirm --needed tree'
+check "nano, vim and vi are installed" '
+    command -v nano && command -v vim && command -v vi'
+check "Docker runs a container" '
+    docker run --rm hello-world'
+check "fastfetch reports protogenOS" '
+    fastfetch --pipe true | grep -q protogenOS'
+
+if ((${#failures[@]})); then
+    printf '\n%d check(s) failed:\n' "${#failures[@]}" >&2
+    printf '  - %s\n' "${failures[@]}" >&2
+    [[ "${keep}" == true ]] || echo "Rerun with --keep to inspect the container." >&2
+    exit 1
+fi
+
+if [[ "${dry_run}" == true ]]; then
+    echo "Dry run complete; nothing was changed."
+elif [[ "${keep}" == true ]]; then
+    echo "All checks passed. Container ${vmid} was kept; enter it with: pct enter ${vmid}"
+else
+    echo "All checks passed."
+fi

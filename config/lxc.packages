@@ -1,0 +1,27 @@
+# protogenOS LXC server template. Mirrors profiles/server.packages minus what a
+# container cannot use: no kernel, firmware, bootloader, disk health tools,
+# NetworkManager (Proxmox configures systemd-networkd), or firewalld (use the
+# Proxmox firewall instead).
+base
+openssh
+man-db
+# Editors people expect in a fresh container; vi is linked to vim at build.
+nano
+vim
+bash-completion
+curl
+rsync
+htop
+# Everyday tools other container templates ship.
+which
+wget
+unzip
+lsof
+bind
+traceroute
+sudo
+tmux
+fastfetch
+# Container runtime; needs the Proxmox nesting and keyctl features.
+docker
+docker-compose

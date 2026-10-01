@@ -1,0 +1,16 @@
+[Unit]
+Description=Initialize the pacman keyring on first boot
+# The template ships without a keyring so every container gets its own
+# local signing key instead of one shared by every copy of the image.
+ConditionPathExists=!/etc/pacman.d/gnupg/trustdb.gpg
+Wants=time-sync.target
+After=time-sync.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/pacman-key --init
+ExecStart=/usr/bin/pacman-key --populate archlinux
+
+[Install]
+WantedBy=multi-user.target
