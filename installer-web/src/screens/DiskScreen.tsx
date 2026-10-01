@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 
-import { getDiskLayout, getDisks } from "@/api/client"
-import type { DiskChoice, DiskInfo, DiskLayout, DiskLayoutKind, Firmware } from "@/api/types"
+import { getDiskLayout, getDisks, getShrinkInfo } from "@/api/client"
+import type { DiskChoice, DiskInfo, DiskLayout, DiskLayoutKind, Firmware, ShrinkInfo } from "@/api/types"
 import { ChoiceList } from "@/components/ChoiceList"
 import { PartitionBar } from "@/components/PartitionBar"
 import { Button } from "@/components/ui/button"
@@ -15,6 +15,11 @@ import { formatSize } from "@/lib/format"
 const GIB = 1024 ** 3
 const MIN_ROOT = 16 * GIB
 const FREE_SPACE_NEEDED = MIN_ROOT + GIB
+const MIB = 1024 ** 2
+const SHRINKABLE = ["ntfs", "ext4"]
+
+// The screen's choices; "shrink" is installing alongside after shrinking.
+type Mode = DiskLayoutKind | "shrink"
 
 function describePartition(part: DiskLayout["partitions"][number]): string {
   const details = [part.fstype || "unformatted", part.label].filter(Boolean).join(", ")
@@ -35,7 +40,13 @@ export function DiskScreen({
   const [disks, setDisks] = useState<DiskInfo[] | null>(null)
   const [disk, setDisk] = useState(value?.disk ?? "")
   const [layout, setLayout] = useState<DiskLayout | null>(null)
-  const [kind, setKind] = useState<DiskLayoutKind>(value?.disk_layout ?? "erase")
+  const [mode, setMode] = useState<Mode>(value?.shrink_partition ? "shrink" : (value?.disk_layout ?? "erase"))
+  const kind: DiskLayoutKind = mode === "shrink" ? "free-space" : mode
+  const [shrinkPartition, setShrinkPartition] = useState(value?.shrink_partition ?? "")
+  const [shrinkInfo, setShrinkInfo] = useState<ShrinkInfo | null>(null)
+  const [shrinkLoading, setShrinkLoading] = useState(false)
+  // Bytes protogenOS receives from the shrunk partition.
+  const [room, setRoom] = useState(0)
   const [rootPartition, setRootPartition] = useState(value?.root_partition ?? "")
   const [bootPartition, setBootPartition] = useState(value?.boot_partition ?? "")
   const [formatBoot, setFormatBoot] = useState(value?.format_boot ?? false)
@@ -58,6 +69,22 @@ export function DiskScreen({
       .catch((err) => setError(String(err)))
   }, [disk])
 
+  useEffect(() => {
+    setShrinkInfo(null)
+    if (!disk || !shrinkPartition) return
+    setShrinkLoading(true)
+    getShrinkInfo(disk, shrinkPartition)
+      .then((info) => {
+        setShrinkInfo(info)
+        const previous = value?.shrink_partition === shrinkPartition ? info.size - (value?.shrink_size ?? 0) : 0
+        const half = Math.floor(info.largest_room / 2 / GIB) * GIB
+        const preferred = previous || Math.max(FREE_SPACE_NEEDED, half)
+        setRoom(Math.min(Math.max(preferred, FREE_SPACE_NEEDED), info.largest_room))
+      })
+      .catch((err) => setError(String(err)))
+      .finally(() => setShrinkLoading(false))
+  }, [disk, shrinkPartition, value])
+
   const uefi = firmware === "uefi"
   const freeSpaceOk = uefi && layout?.table === "gpt" && (layout?.largest_free ?? 0) >= FREE_SPACE_NEEDED
   const partitions = layout?.partitions ?? []
@@ -70,11 +97,25 @@ export function DiskScreen({
     bootPartition !== "" &&
     rootPartition !== bootPartition &&
     (formatBoot || bootInfo?.fstype === "vfat")
+  const shrinkCandidates = partitions.filter(
+    (part) => SHRINKABLE.includes(part.fstype) && part.mountpoints.length === 0 && part.size > FREE_SPACE_NEEDED + 2 * GIB
+  )
+  const shrinkAvailable = uefi && layout?.table === "gpt" && shrinkCandidates.length > 0
+  const shrinkOk = shrinkAvailable && shrinkInfo?.shrinkable === true && room >= FREE_SPACE_NEEDED
+  // Whole MiB, so the freed space starts on an aligned boundary.
+  const shrinkSize = shrinkInfo ? Math.floor((shrinkInfo.size - room) / MIB) * MIB : 0
+  const shrinkLabel = (() => {
+    const part = partitions.find((item) => item.path === shrinkPartition)
+    return part?.label || (part?.fstype === "ntfs" ? "Windows" : shrinkPartition)
+  })()
   const selectedDisk = disks?.find((item) => item.path === disk)
   const ready =
     selectedDisk !== undefined &&
     layout !== null &&
-    (kind === "erase" || (kind === "free-space" && freeSpaceOk) || (kind === "partitions" && partitionsOk))
+    (mode === "erase" ||
+      (mode === "free-space" && freeSpaceOk) ||
+      (mode === "shrink" && shrinkOk) ||
+      (mode === "partitions" && partitionsOk))
 
   const handleNext = () => {
     if (!selectedDisk) return
@@ -85,6 +126,8 @@ export function DiskScreen({
       boot_partition: kind === "partitions" ? bootPartition : null,
       format_boot: kind === "partitions" && formatBoot,
       disk_partitioned: selectedDisk.partitioned,
+      shrink_partition: mode === "shrink" ? shrinkPartition : null,
+      shrink_size: mode === "shrink" ? shrinkSize : 0,
     })
   }
 
@@ -106,6 +149,7 @@ export function DiskScreen({
             setDisk(next)
             setRootPartition("")
             setBootPartition("")
+            setShrinkPartition("")
           }}
           choices={(disks ?? []).map((item) => ({
             value: item.path,
@@ -128,12 +172,13 @@ export function DiskScreen({
               rootPartition={rootPartition}
               bootPartition={bootPartition}
               formatBoot={formatBoot}
+              shrink={mode === "shrink" && shrinkOk ? { partition: shrinkPartition, newSize: shrinkSize } : null}
             />
             <Label className="pt-2">Installation type</Label>
             <ChoiceList
               name="layout"
-              value={kind}
-              onChange={(next) => setKind(next as DiskLayoutKind)}
+              value={mode}
+              onChange={(next) => setMode(next as Mode)}
               choices={[
                 {
                   value: "erase",
@@ -151,6 +196,18 @@ export function DiskScreen({
                   disabled: !freeSpaceOk,
                 },
                 {
+                  value: "shrink",
+                  title: "Make room by shrinking a partition",
+                  description: !uefi
+                    ? "Requires UEFI boot."
+                    : layout.table !== "gpt"
+                      ? "Requires a GPT partition table."
+                      : shrinkCandidates.length === 0
+                        ? "No NTFS (Windows) or ext4 partition with enough room."
+                        : "Shrinks a Windows or Linux partition and installs into the freed space. Its files are kept.",
+                  disabled: !shrinkAvailable,
+                },
+                {
                   value: "partitions",
                   title: "Use existing partitions",
                   description: uefi
@@ -160,6 +217,56 @@ export function DiskScreen({
                 },
               ]}
             />
+          </div>
+        )}
+
+        {layout && mode === "shrink" && (
+          <div className="flex flex-col gap-3 rounded-md border p-3">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="shrink-partition">Partition to shrink</Label>
+              <NativeSelect
+                id="shrink-partition"
+                value={shrinkPartition}
+                onChange={(event) => setShrinkPartition(event.target.value)}
+              >
+                <option value="">Choose…</option>
+                {shrinkCandidates.map((part) => (
+                  <option key={part.path} value={part.path}>
+                    {describePartition(part)}
+                  </option>
+                ))}
+              </NativeSelect>
+            </div>
+            {shrinkLoading && <LoadingText>Measuring how much space is in use…</LoadingText>}
+            {shrinkInfo && !shrinkInfo.shrinkable && (
+              <p className="text-destructive text-xs">{shrinkInfo.reason}</p>
+            )}
+            {shrinkInfo?.shrinkable && (
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="shrink-room">Space for protogenOS</Label>
+                <input
+                  id="shrink-room"
+                  type="range"
+                  className="accent-primary w-full"
+                  min={FREE_SPACE_NEEDED}
+                  max={shrinkInfo.largest_room}
+                  step={GIB}
+                  value={room}
+                  onChange={(event) => setRoom(Number(event.target.value))}
+                />
+                <div className="text-muted-foreground flex justify-between text-xs">
+                  <span>
+                    {shrinkLabel} keeps {formatSize(shrinkSize)}
+                  </span>
+                  <span className="text-foreground">protogenOS gets {formatSize(room)}</span>
+                </div>
+                <p className="text-muted-foreground text-xs">
+                  Back up important files first.
+                  {shrinkInfo.fstype === "ntfs" &&
+                    " Windows must have been shut down fully: turn off Fast Startup and don't hibernate."}
+                </p>
+              </div>
+            )}
           </div>
         )}
 

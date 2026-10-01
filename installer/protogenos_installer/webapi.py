@@ -28,16 +28,25 @@ from .backend import (
     detect_firmware,
     list_install_disks,
     list_timezones,
+    prefetch_packages,
 )
 from .hardware import detect_features, detect_hardware
 from .locales import suggest_locale
 from .logshare import LogShareError, log_tail, upload_log
-from .keyboard import LAYOUT_PATTERN, VARIANT_PATTERN, console_keymap, list_layouts
+from .keyboard import (
+    LAYOUT_PATTERN,
+    VARIANT_PATTERN,
+    apply_plasma_layout,
+    console_keymap,
+    list_layouts,
+)
 from .mirrors import parse_reflector_countries
 from .server import ServerConfigError, fetch_github_keys
-from .storage import StorageError, read_disk_layout
+from .storage import ShrinkInfo, StorageError, read_disk_layout, shrink_info
 from .models import OptionGroup, PackageChoice
 from .network import IwdClient, NetworkError, is_online
+from .prefetch import Prefetcher
+from .preflight import Check, run_checks
 from .profiles import PERSONAS, ProfileError, ProfileRepository
 
 
@@ -142,8 +151,12 @@ def make_handler(
     wifi_client: IwdClient | None = None,
     log_path: Path | None = None,
     keyboard_state: Path | None = None,
+    desktop_user: str | None = None,
+    desktop_keyboard: Callable[[str, str, str], None] = apply_plasma_layout,
     log_uploader: Callable[[bytes], str] = upload_log,
     github_keys: Callable[[str], tuple[str, ...]] = fetch_github_keys,
+    prefetcher: Prefetcher | None = None,
+    preflight: Callable[[], list[Check]] = run_checks,
 ) -> type[BaseHTTPRequestHandler]:
     repository = ProfileRepository(profiles_dir)
     wifi_client = wifi_client or IwdClient()
@@ -203,6 +216,15 @@ def make_handler(
                     self._handle_options(query)
                 elif path == "/api/plan/resolve" and method == "POST":
                     self._handle_resolve()
+                elif path == "/api/preflight" and method == "GET":
+                    self._send_json(
+                        HTTPStatus.OK, {"checks": [check.to_dict() for check in preflight()]}
+                    )
+                elif path == "/api/prefetch" and method == "GET":
+                    self._send_json(
+                        HTTPStatus.OK,
+                        prefetcher.status() if prefetcher is not None else {"state": "idle"},
+                    )
                 elif path == "/api/system" and method == "GET":
                     self._send_json(
                         HTTPStatus.OK,
@@ -234,6 +256,8 @@ def make_handler(
                     self._handle_keyboard()
                 elif path == "/api/mirrors/countries" and method == "GET":
                     self._handle_mirror_countries()
+                elif path == "/api/disks/shrink" and method == "GET":
+                    self._handle_shrink_info(query)
                 elif path == "/api/disks/layout" and method == "GET":
                     disk = query.get("disk", "")
                     if not disk.startswith("/dev/"):
@@ -284,7 +308,29 @@ def make_handler(
             if not isinstance(selections, dict):
                 raise ApiError(HTTPStatus.BAD_REQUEST, "selections must be an object")
             plan = repository.resolve(persona, selections)
+            if prefetcher is not None and session.status != "running":
+                # Download while the user picks disks and accounts; started
+                # first so the next status poll already sees it.
+                hardware = detect_hardware(multilib=plan.multilib_required, desktop=plan.desktop)
+                prefetcher.start(
+                    prefetch_packages(plan, hardware), multilib=plan.multilib_required
+                )
             self._send_json(HTTPStatus.OK, plan.to_dict())
+
+        def _handle_shrink_info(self, query: dict[str, str]) -> None:
+            disk = query.get("disk", "")
+            partition = query.get("partition", "")
+            if not disk.startswith("/dev/") or not partition.startswith(disk):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "disk and one of its partitions are required")
+            layout = read_disk_layout(CommandRunner(), disk)
+            if dry_run:
+                # Don't probe a development machine's disks: pretend half is in use.
+                part = layout.partition(partition)
+                size = part.size if part else 0
+                info = ShrinkInfo(partition, part.fstype if part else "", size, smallest_size=size // 2)
+            else:
+                info = shrink_info(CommandRunner(), layout, partition)
+            self._send_json(HTTPStatus.OK, info.to_dict())
 
         def _handle_disks(self) -> None:
             disks = list_install_disks()
@@ -346,12 +392,20 @@ def make_handler(
                 raise ApiError(HTTPStatus.CONFLICT, "an installation is already running")
 
             def _run() -> None:
+                prefetched: list[Path] = []
+                if prefetcher is not None:
+                    # pacstrap takes over; downloads that finished are reused.
+                    prefetcher.stop()
+                    prefetched = prefetcher.downloaded()
                 backend = InstallerBackend(
                     runner=StreamingCommandRunner(session, dry_run=dry_run, log_path=log_path),
                     dry_run=dry_run,
+                    prefetched_packages=prefetched,
+                    ranked_mirrorlist=prefetcher.mirrorlist if prefetcher is not None else None,
                 )
                 if dry_run:
                     session.append_log(f"+ dry-run target root: {backend.target_root}")
+                inhibitor = None if dry_run else _inhibit_sleep()
                 try:
                     backend.install(plan, config)
                 except InstallError as error:
@@ -360,6 +414,9 @@ def make_handler(
                     session.finish(str(error))
                 else:
                     session.finish(None)
+                finally:
+                    if inhibitor is not None:
+                        inhibitor.terminate()
 
             threading.Thread(target=_run, daemon=True).start()
             self._send_json(HTTPStatus.ACCEPTED, {"started": True})
@@ -382,7 +439,10 @@ def make_handler(
                     capture_output=True,
                     check=False,
                 )
-                if keyboard_state is not None:
+                if desktop_user is not None:
+                    # The live Plasma session switches layouts in place.
+                    desktop_keyboard(desktop_user, layout, variant)
+                elif keyboard_state is not None:
                     keyboard_state.parent.mkdir(parents=True, exist_ok=True)
                     keyboard_state.write_text(f"{layout}\n{variant}\n")
                     # The compositor only reads its XKB layout at startup;
@@ -488,6 +548,24 @@ def make_handler(
     return Handler
 
 
+def _inhibit_sleep() -> subprocess.Popen[bytes] | None:
+    """Keep the live session awake (no suspend or idle lock) while installing."""
+    try:
+        return subprocess.Popen(
+            [
+                "systemd-inhibit",
+                "--what=sleep:idle:handle-lid-switch",
+                "--who=protogenOS installer",
+                "--why=Installing protogenOS",
+                "sleep", "infinity",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return None
+
+
 def _content_type(path: Path) -> str:
     suffix = path.suffix.lower()
     return {
@@ -514,8 +592,12 @@ def create_server(
     wifi_client: IwdClient | None = None,
     log_path: Path | None = None,
     keyboard_state: Path | None = None,
+    desktop_user: str | None = None,
+    desktop_keyboard: Callable[[str, str, str], None] = apply_plasma_layout,
     log_uploader: Callable[[bytes], str] = upload_log,
     github_keys: Callable[[str], tuple[str, ...]] = fetch_github_keys,
+    prefetcher: Prefetcher | None = None,
+    preflight: Callable[[], list[Check]] = run_checks,
 ) -> ThreadingHTTPServer:
     handler = make_handler(
         profiles_dir=profiles_dir,
@@ -526,8 +608,12 @@ def create_server(
         wifi_client=wifi_client,
         log_path=log_path,
         keyboard_state=keyboard_state,
+        desktop_user=desktop_user,
+        desktop_keyboard=desktop_keyboard,
         log_uploader=log_uploader,
         github_keys=github_keys,
+        prefetcher=prefetcher,
+        preflight=preflight,
     )
     return ThreadingHTTPServer((host, port), handler)
 
@@ -557,6 +643,16 @@ def main(argv: list[str] | None = None) -> int:
         help="file shared with the kiosk launcher to persist the keyboard layout "
         "and request a compositor restart when it changes",
     )
+    parser.add_argument(
+        "--desktop-user",
+        help="user running the live Plasma session; keyboard layout changes are "
+        "applied to that session instead of restarting a kiosk compositor",
+    )
+    parser.add_argument(
+        "--no-prefetch",
+        action="store_true",
+        help="don't download packages in the background before installing",
+    )
     args = parser.parse_args(argv)
 
     server = create_server(
@@ -566,6 +662,8 @@ def main(argv: list[str] | None = None) -> int:
         dist_dir=args.dist,
         dry_run=args.dry_run,
         keyboard_state=args.keyboard_state,
+        desktop_user=args.desktop_user,
+        prefetcher=None if args.dry_run or args.no_prefetch else Prefetcher(online_check=is_online),
     )
     host, port = server.server_address[:2]
     print(f"protogenOS web installer listening on http://{host}:{port}/")

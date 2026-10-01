@@ -1,0 +1,10 @@
+[General]
+count=1
+rules=protogenos-installer
+
+[protogenos-installer]
+Description=protogenOS installer window size
+wmclass=protogenos-installer
+wmclassmatch=1
+size=1280,860
+sizerule=3

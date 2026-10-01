@@ -39,6 +39,7 @@ from .mirrors import COUNTRY_PATTERN
 from .storage import GIB, MIN_ROOT_BYTES, DiskLayout, read_disk_layout
 from .models import InstallPlan, OptionGroup, PackageChoice
 from .network import IwdClient, NetworkError, WifiNetwork, is_online
+from .preflight import ERROR, describe_problems, run_checks
 from .profiles import PERSONAS, ProfileRepository
 from .server import (
     SERVER_PERSONA,
@@ -100,6 +101,8 @@ def _run_wizard(
     keyboard = _select_keyboard(stdscr, apply=not dry_run)
     if keyboard is None:
         return WizardResult(cancelled=True)
+
+    _show_preflight(stdscr)
 
     if not dry_run and not _ensure_network(stdscr):
         return WizardResult(cancelled=True)
@@ -225,6 +228,18 @@ def _show_message(stdscr, text: str, *, subtitle: str = "Notice", danger: bool =
     _safe_addstr(stdscr, first + len(lines) + 2, 2, "Press any key to continue...", curses.A_DIM)
     stdscr.refresh()
     stdscr.getch()
+
+
+def _show_preflight(stdscr) -> None:
+    """Show machine problems before any choices; they never block."""
+    try:
+        checks = run_checks()
+    except Exception:  # noqa: BLE001 - checks are advisory
+        return
+    problems = describe_problems(checks)
+    if problems:
+        blocked = any(check.status == ERROR for check in checks)
+        _show_message(stdscr, problems, subtitle="Before you start", danger=blocked)
 
 
 def _run_list(

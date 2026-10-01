@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Install protogenOS
+GenericName=System installer
+Comment=Install protogenOS on this computer
+Exec=protogenos-installer-app
+Icon=system-software-install
+Terminal=false
+X-KDE-autostart-phase=2
+NoDisplay=true
+StartupWMClass=protogenos-installer

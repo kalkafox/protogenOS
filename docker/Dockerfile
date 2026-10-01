@@ -1,7 +1,7 @@
 ARG ARCH_IMAGE=archlinux:base
 FROM ${ARCH_IMAGE}
 
-RUN pacman -Syu --noconfirm --needed archiso curl unzip \
+RUN pacman -Syu --noconfirm --needed archiso curl unzip python \
     && pacman -Scc --noconfirm
 
 ENV BUN_INSTALL=/usr/local

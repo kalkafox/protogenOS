@@ -16,17 +16,27 @@ fail() {
 # archiso's generic udev/kmod autoprobe doesn't always load them this early.
 # Best-effort load them before checking for a DRM device; failures here are
 # expected on hardware/hypervisors that don't need or ship these modules.
-for module in virtio_gpu bochs qxl vmwgfx vboxvideo; do
-    modprobe "${module}" >/dev/null 2>&1 || true
-done
-udevadm settle --timeout=5 >/dev/null 2>&1 || true
+#
+# Machines with no GPU/DRM device at all — bare hardware or a hypervisor with
+# no display device (e.g. QEMU -nographic/-vga none, or a headless VM) — can
+# never run a compositor, so callers fall straight back to the TUI.
+display_available() {
+    local module
+    for module in virtio_gpu bochs qxl vmwgfx vboxvideo; do
+        modprobe "${module}" >/dev/null 2>&1 || true
+    done
+    udevadm settle --timeout=5 >/dev/null 2>&1 || true
+    compgen -G "/dev/dri/card*" >/dev/null 2>&1
+}
 
-# Bail out immediately (before starting anything) on machines with no GPU/DRM
-# device at all — bare hardware or a hypervisor with no display device
-# (e.g. QEMU -nographic/-vga none, or a headless VM) — so the caller can
-# fall straight back to the TUI instead of waiting on a compositor that can
-# never start.
-if ! compgen -G "/dev/dri/card*" >/dev/null 2>&1; then
+# --probe-display only answers whether a graphical session can start here;
+# the live desktop launcher asks before starting Plasma.
+if [[ "${1:-}" == "--probe-display" ]]; then
+    display_available
+    exit
+fi
+
+if ! display_available; then
     echo "protogenos-install-web: no /dev/dri/card* device found; GUI unsupported here" >&2
     exit 1
 fi

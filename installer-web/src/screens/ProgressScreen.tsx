@@ -67,7 +67,7 @@ export function ProgressScreen({
           </p>
           <Progress value={progressValue} />
         </div>
-        <LogView lines={lines} className="h-80" />
+        <LogView lines={lines} className="h-[32rem]" />
       </CardContent>
     </Card>
   )

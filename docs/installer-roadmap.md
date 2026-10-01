@@ -34,6 +34,15 @@ Still open:
 
 ## Known gaps and unverified paths
 
+- **Live desktop networking** uses Archiso's iwd/systemd-networkd, so the
+  Plasma panel has no network applet; Wi-Fi is set up on the installer's
+  network screen.
+- **Partition shrinking** is offered only by the GUI; the text installers
+  can replay it from a saved configuration (`shrink_partition`,
+  `shrink_size`). Never tested against a real Windows installation.
+- **Boot art** is a placeholder paw print until the protogen visor artwork
+  is approved.
+
 - **Windows dual boot** never tested against a real Windows install; only the
   os-prober package and GRUB setting are verified. systemd-boot and Limine do
   not detect Windows on a different EFI partition (the UI recommends GRUB).

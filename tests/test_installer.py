@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -585,6 +586,35 @@ class InstallerBackendTests(unittest.TestCase):
         config.validate(self.zoneinfo)
         self.assertEqual(config.static_dns, ("1.1.1.1",))
 
+    def test_desktop_boots_behind_the_paw_splash(self) -> None:
+        runner = FakeRunner()
+        self._backend(runner).install(self._plan(), self._config(bootloader="grub"))
+        hooks = (self.target / "etc/mkinitcpio.conf").read_text()
+        self.assertIn("systemd plymouth", hooks)
+        self.assertIn("Theme=protogenos", (self.target / "etc/plymouth/plymouthd.conf").read_text())
+        theme = self.target / "usr/share/plymouth/themes/protogenos"
+        self.assertTrue((theme / "protogenos.plymouth").is_file())
+        self.assertTrue((theme / "throbber-0036.png").is_file())
+        grub = (self.target / "etc/default/grub").read_text()
+        self.assertIn("GRUB_CMDLINE_LINUX_DEFAULT='loglevel=3 quiet splash'", grub)
+        self.assertIn("GRUB_THEME=/usr/share/grub/themes/protogenos/theme.txt", grub)
+        self.assertTrue((self.target / "usr/share/grub/themes/protogenos/background.png").is_file())
+        theme_text = (self.target / "usr/share/grub/themes/protogenos/theme.txt").read_text()
+        # GRUB refuses an empty terminal-box pattern and stops at an error screen.
+        self.assertNotIn('terminal-box: ""', theme_text)
+        pacstrap = next(command for command in runner.commands if command[0] == "pacstrap")
+        self.assertIn("plymouth", pacstrap)
+
+    def test_server_shows_boot_messages(self) -> None:
+        runner = FakeRunner()
+        self._backend(runner).install(
+            self._plan(persona="server"), self._config(bootloader="grub", ssh_authorized_keys=(self.SERVER_KEY,))
+        )
+        self.assertNotIn("plymouth", (self.target / "etc/mkinitcpio.conf").read_text())
+        self.assertNotIn("splash", (self.target / "etc/default/grub").read_text())
+        pacstrap = next(command for command in runner.commands if command[0] == "pacstrap")
+        self.assertNotIn("plymouth", pacstrap)
+
     def test_mirrors_are_ranked_and_downloads_parallelized(self) -> None:
         runner = FakeRunner()
         self.pacman_config.write_text("[options]\nParallelDownloads = 5\n")
@@ -595,6 +625,12 @@ class InstallerBackendTests(unittest.TestCase):
             index for index, command in enumerate(runner.commands) if command[0] == "pacstrap"
         ))
         self.assertIn("ParallelDownloads = 15\n", (self.target / "etc/pacman.conf").read_text())
+        # The installed system keeps re-ranking by speed.
+        self.assertIn("reflector.timer", self._enabled_units(runner))
+        reflector_conf = (self.target / "etc/xdg/reflector/reflector.conf").read_text()
+        self.assertIn("--sort rate\n", reflector_conf)
+        pacstrap = next(command for command in runner.commands if command[0] == "pacstrap")
+        self.assertIn("reflector", pacstrap)
 
     def test_first_login_applies_icons_after_look_and_feel(self) -> None:
         plan = InstallPlan(
@@ -676,24 +712,30 @@ class InstallerBackendTests(unittest.TestCase):
         self.assertEqual(result.stdout, "two\nthree\n")
         self.assertIn("two\nthree\n", log_path.read_text())
 
-    def test_heartbeat_reports_growing_then_unchanged_cache(self) -> None:
+    def test_heartbeat_reports_growth_and_skips_unchanged_repeats(self) -> None:
         cache = self.root / "cache"
         cache.mkdir()
         lines: list[str] = []
-        ready = threading.Event()
+        grown = threading.Event()
 
         def emit(line: str) -> None:
             lines.append(line)
             if len(lines) == 1:
                 (cache / "linux.pkg.tar.zst.part").write_bytes(b"x" * 2048)
-            if len(lines) == 3:
-                ready.set()
+                grown.set()
 
         with DownloadHeartbeat(emit, cache, interval=0.01):
-            self.assertTrue(ready.wait(5))
-        self.assertEqual(lines[0], "Package cache: 0.0 B downloaded so far")
-        self.assertEqual(lines[1], "Package cache: 2.0 KiB downloaded so far")
-        self.assertTrue(lines[2].startswith("Package cache: 2.0 KiB (unchanged for "))
+            self.assertTrue(grown.wait(5))
+            # Give several more ticks a chance to fire; the unchanged size
+            # after growth must not be re-emitted on each one.
+            time.sleep(0.1)
+        self.assertEqual(
+            lines,
+            [
+                "Package cache: 0.0 B downloaded so far",
+                "Package cache: 2.0 KiB downloaded so far",
+            ],
+        )
 
     def test_aur_multilib_persisted_to_target_pacman_conf(self) -> None:
         runner = FakeRunner()
@@ -933,7 +975,7 @@ class InstallerBackendTests(unittest.TestCase):
         runner = FakeRunner()
         self._backend(runner).install(self._plan(), self._config(bootloader="limine", filesystem="xfs", swap="none"))
         conf = (self.target / "boot/limine.conf").read_text()
-        self.assertIn("cmdline: root=UUID=ROOT-UUID rw\n", conf)
+        self.assertIn("cmdline: root=UUID=ROOT-UUID rw quiet splash\n", conf)
         efibootmgr = next(command for command in self._chroot_commands(runner) if command[0] == "efibootmgr")
         self.assertIn("--part", efibootmgr)
         self.assertEqual(efibootmgr[efibootmgr.index("--part") + 1], "1")

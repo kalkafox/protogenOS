@@ -1,14 +1,106 @@
-# Launch once on the primary live console; exiting returns to this login shell.
+# Start the live session once on the primary console. The default is a live
+# Plasma desktop with the graphical installer open; machines that can't run
+# it get the installer alone in a kiosk, then the text installer.
+#
+# protogenos.installer= on the kernel command line picks a mode explicitly:
+#   desktop  live Plasma desktop (falls back to kiosk if Plasma fails)
+#   kiosk    graphical installer only, under cage
+#   tui      text installer only
 if [[ -o interactive && -t 0 \
     && "$(tty 2>/dev/null)" == /dev/tty1 \
     && -z "${PROTOGENOS_INSTALLER_STARTED:-}" ]]; then
     export PROTOGENOS_INSTALLER_STARTED=1
-    if grep -qw 'protogenos.installer=tui' /proc/cmdline 2>/dev/null; then
-        protogenos-install
-    else
-        protogenos-install-web || protogenos-install
-    fi
+
+    # Plasma needs more memory than the installer alone: it and the live
+    # system's files both live in RAM.
+    protogenos_desktop_min_kib=3500000
+
+    protogenos_as_root() {
+        if (( EUID == 0 )); then
+            "$@"
+        else
+            sudo "$@"
+        fi
+    }
+
+    protogenos_mode() {
+        local cmdline mode memory_kib
+        cmdline="$(</proc/cmdline)"
+        if [[ " ${cmdline} " =~ " protogenos.installer=([a-z]+) " ]]; then
+            mode="${match[1]}"
+            if [[ "${mode}" == (desktop|kiosk|tui) ]]; then
+                print -- "${mode}"
+                return
+            fi
+        fi
+        memory_kib="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)"
+        if (( EUID != 0 )) && command -v startplasma-wayland >/dev/null 2>&1 \
+            && (( ${memory_kib:-0} >= protogenos_desktop_min_kib )); then
+            print desktop
+        else
+            print kiosk
+        fi
+    }
+
+    protogenos_installers() {
+        protogenos_as_root protogenos-install-web || protogenos_as_root protogenos-install
+    }
+
+    # Returns non-zero when Plasma could not start, so the caller falls back.
+    protogenos_desktop() {
+        local started exit_status
+        if (( EUID == 0 )) || ! command -v startplasma-wayland >/dev/null 2>&1; then
+            return 1
+        fi
+        if ! sudo protogenos-install-web --probe-display; then
+            print "protogenOS: no display device found; skipping the live desktop."
+            return 1
+        fi
+        print "Starting the protogenOS live desktop..."
+        started=${SECONDS}
+        exit_status=0
+        /usr/lib/plasma-dbus-run-session-if-needed /usr/bin/startplasma-wayland \
+            > /tmp/protogenos-live-desktop.log 2>&1 || exit_status=$?
+        # Leaving a working desktop is a normal logout; a crash right after
+        # starting means this machine can't run Plasma.
+        if (( exit_status != 0 && SECONDS - started < 60 )); then
+            print "protogenOS: the live desktop stopped (status ${exit_status});"
+            print "see /tmp/protogenos-live-desktop.log. Opening the installer alone."
+            return 1
+        fi
+        return 0
+    }
+
+    protogenos_left_desktop=false
+    case "$(protogenos_mode)" in
+        desktop)
+            if protogenos_desktop; then
+                protogenos_left_desktop=true
+            else
+                protogenos_installers
+            fi
+            ;;
+        kiosk)
+            protogenos_installers
+            ;;
+        tui)
+            protogenos_as_root protogenos-install
+            ;;
+    esac
+    unfunction protogenos_as_root protogenos_mode protogenos_installers protogenos_desktop
+
     print
-    print "protogenOS installer closed. Run 'protogenos-install' (text) or"
-    print "'protogenos-install-web' (graphical) to reopen it."
+    if [[ "${protogenos_left_desktop}" == true ]]; then
+        print "Left the protogenOS live desktop. Log out (Ctrl+D) to start it"
+        print "again, or run 'sudo protogenos-install' for the text installer."
+    else
+        print "protogenOS installer closed. Run 'protogenos-install' (text) or"
+        print "'protogenos-install-web' (graphical) to reopen it."
+        if (( EUID != 0 )); then
+            # Arch users expect a root shell on the install medium.
+            print "This is a root shell; 'exit' returns to the live user."
+            sudo -i
+        fi
+    fi
+    unset protogenos_left_desktop protogenos_desktop_min_kib
 fi

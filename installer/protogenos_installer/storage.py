@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -38,6 +39,15 @@ FILESYSTEM_PACKAGES = {
     "xfs": "xfsprogs",
     "f2fs": "f2fs-tools",
 }
+
+
+# Filesystems that can be shrunk to make room for protogenOS.
+SHRINKABLE_FILESYSTEMS = ("ntfs", "ext4")
+# Free space left on a shrunk filesystem beyond its minimum: Windows needs
+# room to boot and update, and nearly full filesystems fragment badly.
+SHRINK_HEADROOM = 2 * GIB
+# A shrunk partition must leave room for the new ESP and root partitions.
+SHRINK_ROOM_NEEDED = MIN_ROOT_BYTES + ESP_SIZE_MIB * MIB
 
 
 class StorageError(RuntimeError):
@@ -201,6 +211,117 @@ def read_disk_layout(runner: CommandRunner, disk: str) -> DiskLayout:
     return parse_disk_layout(disk, parted.stdout or "", lsblk.stdout or "")
 
 
+@dataclass(frozen=True, slots=True)
+class ShrinkInfo:
+    """How far an existing partition can shrink to make room."""
+
+    partition: str
+    fstype: str
+    size: int
+    # Smallest size the partition may keep, headroom included; 0 when it
+    # can't be shrunk (see reason).
+    smallest_size: int = 0
+    reason: str = ""
+
+    @property
+    def largest_room(self) -> int:
+        """Space a shrink can free, aligned down to whole MiB."""
+        if not self.smallest_size:
+            return 0
+        return max(((self.size - self.smallest_size) // MIB) * MIB, 0)
+
+    @property
+    def shrinkable(self) -> bool:
+        return self.largest_room >= SHRINK_ROOM_NEEDED
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "partition": self.partition,
+            "fstype": self.fstype,
+            "size": self.size,
+            "smallest_size": self.smallest_size,
+            "largest_room": self.largest_room,
+            "shrinkable": self.shrinkable,
+            "reason": self.reason or ("" if self.shrinkable else "not enough free space inside it"),
+        }
+
+
+def _align_up(value: int, alignment: int = MIB) -> int:
+    return -(-value // alignment) * alignment
+
+
+def parse_ntfs_minimum(output: str) -> int | None:
+    """Smallest size from `ntfsresize --info`: 'You might resize at N bytes'."""
+    match = re.search(r"resize at (\d+) bytes", output)
+    return int(match.group(1)) if match else None
+
+
+def parse_ext4_minimum(resize_output: str, dumpe2fs_output: str) -> int | None:
+    """`resize2fs -P` minimum (in blocks) times dumpe2fs's block size."""
+    blocks = re.search(r"minimum size of the filesystem:\s*(\d+)", resize_output)
+    block_size = re.search(r"^Block size:\s*(\d+)", dumpe2fs_output, re.MULTILINE)
+    if not blocks or not block_size:
+        return None
+    return int(blocks.group(1)) * int(block_size.group(1))
+
+
+def _ntfs_refusal(output: str) -> str:
+    lowered = output.lower()
+    if "hibernat" in lowered or "unsafe state" in lowered or "fast restart" in lowered:
+        return (
+            "Windows is hibernated or uses Fast Startup. Start Windows, turn off Fast "
+            "Startup, and shut down fully; then try again."
+        )
+    if "chkdsk" in lowered or "inconsistent" in lowered or "marked for consistency" in lowered:
+        return "Windows needs to check this disk first: run chkdsk /f in Windows and restart."
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return lines[-1] if lines else "ntfsresize could not read this partition"
+
+
+def shrink_info(runner: CommandRunner, layout: DiskLayout, path: str) -> ShrinkInfo:
+    """Measure how small a partition can get without touching it."""
+    part = layout.partition(path)
+    if part is None:
+        return ShrinkInfo(path, "", 0, reason=f"{path} is not a partition on {layout.path}")
+    info = ShrinkInfo(part.path, part.fstype, part.size)
+    if part.fstype.lower() == "bitlocker":
+        return ShrinkInfo(
+            part.path, part.fstype, part.size,
+            reason="BitLocker-encrypted; shrink it from Windows Disk Management instead.",
+        )
+    if part.fstype not in SHRINKABLE_FILESYSTEMS:
+        return ShrinkInfo(
+            part.path, part.fstype, part.size,
+            reason=f"{part.fstype or 'unformatted'} partitions can't be shrunk here",
+        )
+    if part.mountpoints:
+        return ShrinkInfo(part.path, part.fstype, part.size, reason=f"{part.path} is mounted")
+    minimum: int | None
+    if part.fstype == "ntfs":
+        result = runner.run(
+            ["ntfsresize", "--info", "--force", "--no-action", part.path],
+            capture_output=True,
+            check=False,
+        )
+        output = f"{result.stdout or ''}\n{result.stderr or ''}"
+        minimum = parse_ntfs_minimum(output) if result.returncode == 0 else None
+        if minimum is None:
+            return ShrinkInfo(part.path, part.fstype, part.size, reason=_ntfs_refusal(output))
+    else:
+        estimate = runner.run(["resize2fs", "-P", part.path], capture_output=True, check=False)
+        header = runner.run(["dumpe2fs", "-h", part.path], capture_output=True, check=False)
+        minimum = parse_ext4_minimum(
+            f"{estimate.stdout or ''}{estimate.stderr or ''}", header.stdout or ""
+        )
+        if minimum is None:
+            return ShrinkInfo(
+                part.path, part.fstype, part.size,
+                reason="could not measure the ext4 filesystem; check it with e2fsck",
+            )
+    smallest = min(_align_up(minimum + SHRINK_HEADROOM), part.size)
+    return ShrinkInfo(info.partition, info.fstype, info.size, smallest_size=smallest)
+
+
 @dataclass(slots=True)
 class PreparedStorage:
     root_partition: str
@@ -227,6 +348,8 @@ class StorageManager:
             root, boot, esp_number = self._erase_layout(config)
             format_boot = boot is not None
         elif config.disk_layout == "free-space":
+            if config.shrink_partition:
+                self._shrink_partition(config)
             root, boot, esp_number = self._free_space_layout(config)
             format_boot = True
         else:
@@ -322,6 +445,49 @@ class StorageManager:
         self._parted(disk, "set", str(esp.number), "esp", "on")
         self.runner.run(["udevadm", "settle"])
         return root.path, esp.path, esp.number
+
+    def _shrink_partition(self, config: InstallConfig) -> None:
+        """Shrink an NTFS or ext4 partition from its end to free space.
+
+        The filesystem shrinks first, then the partition; both keep their
+        start, so the data never moves.
+        """
+        path = config.shrink_partition or ""
+        new_size = (config.shrink_size // MIB) * MIB
+        if self.dry_run:
+            self.runner.emit(f"  (dry-run: would shrink {path} to {new_size} bytes)")
+            return
+        layout = read_disk_layout(self.runner, config.disk)
+        if layout.table != "gpt":
+            raise StorageError("shrinking a partition requires a GPT partition table")
+        part = layout.partition(path)
+        info = shrink_info(self.runner, layout, path)
+        if part is None or not info.smallest_size:
+            raise StorageError(f"{path} can't be shrunk: {info.reason}")
+        if new_size < info.smallest_size:
+            raise StorageError(
+                f"{path} can't be smaller than {info.smallest_size // MIB} MiB "
+                "(its files plus room to keep working)"
+            )
+        if part.size - new_size < SHRINK_ROOM_NEEDED:
+            raise StorageError(
+                f"shrinking {path} to {new_size // MIB} MiB frees less than the "
+                f"{SHRINK_ROOM_NEEDED // GIB} GiB protogenOS needs"
+            )
+        self.runner.emit(f"Shrinking {path} to {new_size // MIB} MiB")
+        if part.fstype == "ntfs":
+            # The test run must pass before the real one touches anything.
+            self.runner.run(["ntfsresize", "--no-action", "--size", str(new_size), path])
+            self.runner.run(["ntfsresize", "--force", "--size", str(new_size), path])
+        else:
+            self.runner.run(["e2fsck", "-f", "-p", path])
+            self.runner.run(["resize2fs", path, f"{new_size // 1024}K"])
+        sectors = new_size // layout.sector_size
+        self.runner.run(
+            ["sfdisk", "--no-reread", "-N", str(part.number), config.disk],
+            input_text=f", {sectors}\n",
+        )
+        self._settle(config.disk)
 
     def _existing_layout(self, config: InstallConfig) -> tuple[str, str | None, int | None]:
         root = config.root_partition or ""

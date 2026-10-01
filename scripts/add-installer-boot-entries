@@ -1,72 +1,119 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Add "text installer" boot menu entries (protogenos.installer=tui) next to
-# the default live entry in every Archiso boot configuration of a profile.
-# The default entry keeps starting the graphical installer.
+# Add installer-mode boot menu entries next to the default live entry in
+# every Archiso boot configuration of a profile:
+#   "with installer only"  protogenos.installer=kiosk  (no live desktop)
+#   "with text installer"  protogenos.installer=tui
+# The default entry starts the live desktop with the graphical installer.
+# It and the kiosk entry boot behind the Plymouth splash (quiet splash); the
+# text installer entry keeps boot messages visible as the rescue path.
 
 profile_dir="${1:?usage: add-installer-boot-entries PROFILE_DIR}"
-tui_parameter="protogenos.installer=tui"
-tui_suffix="with text installer"
 
-# systemd-boot (UEFI): copy the default entry and sort it right after.
-default_entry="${profile_dir}/efiboot/loader/entries/01-archiso-linux.conf"
-tui_entry="${profile_dir}/efiboot/loader/entries/01-archiso-linux-tui.conf"
-if [[ -f "${default_entry}" ]]; then
-    sed \
-        -e "s/^title .*/& ${tui_suffix}/" \
-        -e 's/^sort-key .*/sort-key 01a/' \
-        -e "s/^options .*/& ${tui_parameter}/" \
-        "${default_entry}" > "${tui_entry}"
-fi
+# add_entries MODE SUFFIX SORT_KEY HOTKEY
+# Each call inserts its entry directly after the default one, so the last
+# call ends up first in the menu.
+add_entries() {
+    local mode="$1" suffix_text="$2" sort_key="$3" hotkey="$4"
+    local parameter="protogenos.installer=${mode}"
 
-# GRUB (UEFI and BIOS from the ISO, plus loopback booting): repeat the
-# menuentry with id 'archlinux' as 'archlinux-tui'.
-for grub_config in "${profile_dir}/grub/grub.cfg" "${profile_dir}/grub/loopback.cfg"; do
-    [[ -f "${grub_config}" ]] || continue
-    awk -v parameter="${tui_parameter}" -v suffix="${tui_suffix}" '
-        { print }
-        /--id .archlinux. \{/ { copying = 1; block = "" }
-        copying { block = block $0 "\n" }
-        copying && /^}/ {
-            copying = 0
-            sub(/\)" --class/, ") " suffix "\" --hotkey t --class", block)
-            sub(/--id .archlinux. \{/, "--id '\''archlinux-tui'\'' {", block)
-            n = split(block, lines, "\n")
-            printf "\n"
-            for (i = 1; i < n; i++) {
-                line = lines[i]
-                if (line ~ /^ +linux /) line = line " " parameter
-                print line
+    # systemd-boot (UEFI): copy the default entry and sort it right after.
+    local default_entry="${profile_dir}/efiboot/loader/entries/01-archiso-linux.conf"
+    local mode_entry="${profile_dir}/efiboot/loader/entries/01-archiso-linux-${mode}.conf"
+    if [[ -f "${default_entry}" ]]; then
+        sed \
+            -e "s/^title .*/& ${suffix_text}/" \
+            -e "s/^sort-key .*/sort-key ${sort_key}/" \
+            -e "s/^options .*/& ${parameter}/" \
+            "${default_entry}" > "${mode_entry}"
+    fi
+
+    # GRUB (UEFI and BIOS from the ISO, plus loopback booting): repeat the
+    # menuentry with id 'archlinux' as 'archlinux-MODE'.
+    local grub_config
+    for grub_config in "${profile_dir}/grub/grub.cfg" "${profile_dir}/grub/loopback.cfg"; do
+        [[ -f "${grub_config}" ]] || continue
+        awk -v parameter="${parameter}" -v suffix="${suffix_text}" \
+            -v mode="${mode}" -v hotkey="${hotkey}" '
+            { print }
+            /--id .archlinux. \{/ { copying = 1; block = "" }
+            copying { block = block $0 "\n" }
+            copying && /^}/ {
+                copying = 0
+                sub(/\)" --class/, ") " suffix "\" --hotkey " hotkey " --class", block)
+                sub(/--id .archlinux. \{/, "--id '\''archlinux-" mode "'\'' {", block)
+                n = split(block, lines, "\n")
+                printf "\n"
+                for (i = 1; i < n; i++) {
+                    line = lines[i]
+                    if (line ~ /^ +linux /) line = line " " parameter
+                    print line
+                }
             }
-        }
-    ' "${grub_config}" > "${grub_config}.tmp"
-    mv "${grub_config}.tmp" "${grub_config}"
-done
+        ' "${grub_config}" > "${grub_config}.tmp"
+        mv "${grub_config}.tmp" "${grub_config}"
+    done
 
-# Syslinux (BIOS): repeat the "LABEL arch" block as "LABEL archtui".
-syslinux_config="${profile_dir}/syslinux/archiso_sys-linux.cfg"
-if [[ -f "${syslinux_config}" ]]; then
-    awk -v parameter="${tui_parameter}" -v suffix="${tui_suffix}" '
-        function flush() {
-            if (block == "") return
-            n = split(block, lines, "\n")
-            print ""
-            for (i = 1; i < n; i++) {
-                line = lines[i]
-                if (line == "LABEL arch") line = "LABEL archtui"
-                else if (line ~ /^Boot the .* on BIOS\.$/) sub(/\.$/, " " suffix ".", line)
-                else if (line ~ /^MENU LABEL /) line = line " " suffix
-                else if (line ~ /^APPEND /) line = line " " parameter
-                print line
+    # Syslinux (BIOS): repeat the "LABEL arch" block as "LABEL archMODE".
+    local syslinux_config="${profile_dir}/syslinux/archiso_sys-linux.cfg"
+    if [[ -f "${syslinux_config}" ]]; then
+        awk -v parameter="${parameter}" -v suffix="${suffix_text}" -v mode="${mode}" '
+            function flush() {
+                if (block == "") return
+                n = split(block, lines, "\n")
+                print ""
+                for (i = 1; i < n; i++) {
+                    line = lines[i]
+                    if (line == "LABEL arch") line = "LABEL arch" mode
+                    else if (line ~ /^Boot the .* on BIOS\.$/) sub(/\.$/, " " suffix ".", line)
+                    else if (line ~ /^MENU LABEL /) line = line " " suffix
+                    else if (line ~ /^APPEND /) line = line " " parameter
+                    print line
+                }
+                block = ""
             }
-            block = ""
-        }
-        /^LABEL arch$/ { copying = 1 }
-        copying && /^$/ { copying = 0; flush() }
-        { print }
-        copying { block = block $0 "\n" }
-        END { if (copying) flush() }
-    ' "${syslinux_config}" > "${syslinux_config}.tmp"
-    mv "${syslinux_config}.tmp" "${syslinux_config}"
-fi
+            /^LABEL arch$/ { copying = 1 }
+            copying && /^$/ { copying = 0; flush() }
+            { print }
+            copying { block = block $0 "\n" }
+            END { if (copying) flush() }
+        ' "${syslinux_config}" > "${syslinux_config}.tmp"
+        mv "${syslinux_config}.tmp" "${syslinux_config}"
+    fi
+}
+
+# add_splash: append "quiet splash" to the default entry everywhere.
+add_splash() {
+    local default_entry="${profile_dir}/efiboot/loader/entries/01-archiso-linux.conf"
+    if [[ -f "${default_entry}" ]]; then
+        sed -i -e '/^options / { / splash/! s/$/ quiet splash/ }' "${default_entry}"
+    fi
+    local config
+    for config in "${profile_dir}/grub/grub.cfg" "${profile_dir}/grub/loopback.cfg"; do
+        [[ -f "${config}" ]] || continue
+        awk '
+            /--id .archlinux. \{/ { inside = 1 }
+            inside && /^ +linux / && !/ splash/ { $0 = $0 " quiet splash" }
+            inside && /^}/ { inside = 0 }
+            { print }
+        ' "${config}" > "${config}.tmp"
+        mv "${config}.tmp" "${config}"
+    done
+    local syslinux_config="${profile_dir}/syslinux/archiso_sys-linux.cfg"
+    if [[ -f "${syslinux_config}" ]]; then
+        awk '
+            /^LABEL arch$/ { inside = 1 }
+            inside && /^APPEND / && !/ splash/ { $0 = $0 " quiet splash" }
+            inside && /^$/ { inside = 0 }
+            { print }
+        ' "${syslinux_config}" > "${syslinux_config}.tmp"
+        mv "${syslinux_config}.tmp" "${syslinux_config}"
+    fi
+}
+
+# The text entry copies the default before it gets the splash; the kiosk
+# entry copies it after.
+add_entries tui "with text installer" 01b t
+add_splash
+add_entries kiosk "with installer only" 01a i

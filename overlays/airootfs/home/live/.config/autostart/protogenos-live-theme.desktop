@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=protogenOS live theme
+Exec=plasma-apply-lookandfeel -a org.kde.breezedark.desktop
+X-KDE-autostart-phase=1
+NoDisplay=true

@@ -73,7 +73,7 @@ args=(
     -machine q35
     -m "${memory}"
     -smp "${cpus}"
-    -vga virtio
+    -vga std
     -device qemu-xhci -device usb-tablet
     -nic user,model=virtio-net-pci
     -drive "file=${disk},if=virtio,format=qcow2"

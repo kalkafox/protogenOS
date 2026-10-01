@@ -72,6 +72,44 @@ creates an isolated directory under `/tmp`, invokes `prepare-profile` and
 `build-iso`, copies artifacts into `out/`, and generates `SHA256SUMS`.
 `HOST_UID` and `HOST_GID` restore local artifact ownership when supplied.
 
+## LXC Template Scripts
+
+### `scripts/build-lxc`
+
+Builds the Proxmox LXC server template in the Docker builder image:
+
+```bash
+./scripts/build-lxc
+```
+
+It uses the same image, `PROTOGENOS_BUILDER_IMAGE`, `PROTOGENOS_ARCH_IMAGE`
+and package cache as `docker-build`, and it also runs `--privileged` because
+`pacstrap` creates mounts. The template and its `.sha256` file replace older
+templates in `out/`. See [`docs/lxc.md`](lxc.md).
+
+### `scripts/container-build-lxc`
+
+Internal Docker entry point used by `build-lxc`. It installs
+[`config/lxc.packages`](../config/lxc.packages) into a new root with
+`pacstrap`, applies `overlays/lxc/` and the branding, enables services, removes
+per-machine state, checks the result and packs it with zstd.
+`PROTOGENOS_OUTPUT_DIR` changes the destination.
+
+### `scripts/test-lxc`
+
+Creates a disposable unprivileged container from the template on a Proxmox
+VE node, runs smoke checks, then destroys it:
+
+```bash
+./scripts/test-lxc
+./scripts/test-lxc --host root@pve --keep
+./scripts/test-lxc --dry-run
+```
+
+Supported options are `--host USER@HOST`, `--template PATH`, `--vmid ID`,
+`--storage NAME`, `--template-storage NAME`, `--bridge NAME`, `--keep`, and
+`--dry-run`.
+
 ## Installer and Validation
 
 ### `scripts/protogenos-install`

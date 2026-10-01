@@ -55,6 +55,25 @@ def add_encrypt_hook(mkinitcpio_conf: str) -> str:
     )
 
 
+def add_plymouth_hook(mkinitcpio_conf: str) -> str:
+    """Insert plymouth right after systemd/udev: before any encrypt hook,
+    so the passphrase prompt is drawn by the splash."""
+    match = _HOOKS_PATTERN.search(mkinitcpio_conf)
+    if match is None:
+        raise BootConfigError("mkinitcpio.conf has no HOOKS=(...) line")
+    hooks = match.group("hooks").split()
+    if "plymouth" in hooks:
+        return mkinitcpio_conf
+    anchor = next((hook for hook in ("systemd", "udev", "base") if hook in hooks), None)
+    position = hooks.index(anchor) + 1 if anchor else 0
+    hooks.insert(position, "plymouth")
+    return (
+        mkinitcpio_conf[: match.start()]
+        + f"HOOKS=({' '.join(hooks)})"
+        + mkinitcpio_conf[match.end() :]
+    )
+
+
 def remove_hook(mkinitcpio_conf: str, hook: str) -> str:
     match = _HOOKS_PATTERN.search(mkinitcpio_conf)
     if match is None:
@@ -83,6 +102,7 @@ def kernel_cmdline(
     systemd_initramfs: bool = True,
     zram: bool = False,
     serial_console: bool = False,
+    splash: bool = False,
     include_root: bool = True,
 ) -> str:
     """Full command line for loaders that don't generate one (systemd-boot, Limine).
@@ -109,6 +129,8 @@ def kernel_cmdline(
     if serial_console:
         # The last console= becomes /dev/console, so boot messages reach serial.
         parameters += ["console=tty0", "console=ttyS0,115200"]
+    if splash:
+        parameters += ["quiet", "splash"]
     return " ".join(parameters)
 
 
@@ -140,7 +162,12 @@ def limine_conf(kernel: str, cmdline: str, *, fallback: bool = False, timeout: i
     entries = [("protogenOS", f"initramfs-{kernel}.img")]
     if fallback:
         entries.append(("protogenOS (fallback initramfs)", f"initramfs-{kernel}-fallback.img"))
-    text = f"timeout: {timeout}\n"
+    text = (
+        f"timeout: {timeout}\n"
+        "interface_branding: protogenOS\n"
+        # Palette index 1 is red, the protogenOS accent.
+        "interface_branding_colour: 1\n"
+    )
     for title, initramfs in entries:
         text += (
             "\n"

@@ -2,12 +2,20 @@ import { useEffect, useState } from "react"
 import { TriangleAlert } from "lucide-react"
 
 import { getDiskLayout, getDisks, getSystem } from "@/api/client"
-import type { DiskInfo, DiskLayout, HardwareSummary, InstallConfig, InstallPlan } from "@/api/types"
+import type {
+  DiskInfo,
+  DiskLayout,
+  HardwareSummary,
+  InstallConfig,
+  InstallPlan,
+  PrefetchStatus,
+} from "@/api/types"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { Spinner } from "@/components/ui/spinner"
+import { prefetchProgress } from "@/components/PrefetchBar"
 import { formatSize } from "@/lib/format"
 import { describeNetwork } from "@/lib/server"
 
@@ -57,6 +65,17 @@ function dataWarning(config: InstallConfig, disk: DiskInfo | undefined, layout: 
       action: "Format and install",
     }
   }
+  if (config.disk_layout === "free-space" && config.shrink_partition) {
+    const shrunk = partitions.find((part) => part.path === config.shrink_partition)
+    return {
+      title: `${config.shrink_partition} will be shrunk to ${formatSize(config.shrink_size)} to make room`,
+      lost: [],
+      acknowledgement: `I have backed up the important files on ${config.shrink_partition}${
+        shrunk?.fstype === "ntfs" ? " and shut Windows down fully (no Fast Startup)" : ""
+      }.`,
+      action: "Shrink and install",
+    }
+  }
   if (config.disk_layout === "free-space") {
     return {
       title: `protogenOS will be installed in the free space on ${diskName(disk, config.disk)}`,
@@ -73,10 +92,34 @@ function dataWarning(config: InstallConfig, disk: DiskInfo | undefined, layout: 
   }
 }
 
+// Packages the installer downloads in the background while choices are made.
+function describePrefetch(prefetch: PrefetchStatus | null): string | null {
+  if (!prefetch) return null
+  const { total, planned, downloaded, partial } = prefetchProgress(prefetch)
+  switch (prefetch.state) {
+    case "preparing":
+      return "Preparing to download packages…"
+    case "downloading":
+      return `${formatSize(downloaded)} of ${formatSize(planned)} downloaded${partial ? ` (of ${formatSize(total)} total)` : ""}`
+    case "done":
+      return partial
+        ? `${formatSize(planned)} of ${formatSize(total)} downloaded ahead; the rest during installation`
+        : `All ${prefetch.packages ?? 0} packages downloaded (${formatSize(total)})`
+    case "skipped":
+    case "failed":
+      return `During installation${prefetch.reason ? ` (${prefetch.reason})` : ""}`
+    default:
+      return null
+  }
+}
+
 function describeTarget(config: InstallConfig): string {
   if (config.disk_layout === "partitions") {
     const boot = config.format_boot ? "formatted" : "kept"
     return `${config.root_partition} formatted as root; ${config.boot_partition} (${boot}) as /boot`
+  }
+  if (config.disk_layout === "free-space" && config.shrink_partition) {
+    return `${config.shrink_partition} shrunk to ${formatSize(config.shrink_size)}; new partitions in the freed space`
   }
   if (config.disk_layout === "free-space") {
     return `New partitions in the free space on ${config.disk}; existing partitions kept`
@@ -87,11 +130,13 @@ function describeTarget(config: InstallConfig): string {
 export function ReviewScreen({
   plan,
   config,
+  prefetch,
   onBack,
   onInstall,
 }: {
   plan: InstallPlan
   config: InstallConfig
+  prefetch: PrefetchStatus | null
   onBack: () => void
   onInstall: () => Promise<void>
 }) {
@@ -101,6 +146,7 @@ export function ReviewScreen({
   const [disk, setDisk] = useState<DiskInfo | undefined>(undefined)
   const [layout, setLayout] = useState<DiskLayout | null>(null)
   const warning = dataWarning(config, disk, layout)
+
 
   useEffect(() => {
     getSystem()
@@ -159,6 +205,10 @@ export function ReviewScreen({
     ["Mirrors", config.mirror_country || "Automatic"],
     ["Kernel headers", config.kernel_headers ? "Yes" : "No"],
   ]
+  const prefetchSummary = describePrefetch(prefetch)
+  if (prefetchSummary) {
+    rows.push(["Downloads", prefetchSummary])
+  }
   if (plan.persona === "server") {
     const keys = config.ssh_authorized_keys.length
     rows.push(["SSH", `Key-only login, ${keys} authorized key${keys === 1 ? "" : "s"}; firewall on`])
@@ -228,7 +278,7 @@ export function ReviewScreen({
             Back
           </Button>
           <Button
-            variant={config.disk_layout === "free-space" ? "default" : "destructive"}
+            variant={config.disk_layout === "free-space" && !config.shrink_partition ? "default" : "destructive"}
             aria-busy={starting}
             disabled={!acknowledged || starting}
             onClick={handleInstall}

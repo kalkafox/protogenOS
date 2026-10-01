@@ -31,13 +31,18 @@ and has its own installer, so you don't need to know Arch to set it up.
 
 ## Highlights
 
-- **Graphical and text installers.** A browser-based installer starts
-  automatically on the live ISO. Machines without a display, and anyone who
-  prefers the terminal, get a curses text installer with the same options.
+- **Live desktop.** The ISO boots into a Plasma session with the installer
+  open in a window, so you can browse and test hardware first. Machines that
+  can't run it get the installer full screen, or a curses text installer
+  with the same options.
+- **Fast, careful installs.** Packages download in the background, from the
+  fastest mirrors, while you're still choosing. Pre-flight checks flag a
+  missing disk, battery power, legacy BIOS mode and more before you start.
 - **Personas.** Pick General Use, Gamer, Developer, Server or Minimal, then swap
   individual apps: browser, terminal, file manager, editor, kernel and more.
-- **Storage options.** Erase a disk, install next to another OS, or reuse
-  existing partitions. Btrfs, ext4, XFS or F2FS, with optional LUKS2 encryption.
+- **Storage options.** Erase a disk, install into free space or shrink
+  Windows (NTFS) or an ext4 partition to make room, or reuse existing
+  partitions. Btrfs, ext4, XFS or F2FS, with optional LUKS2 encryption.
 - **Hardware-aware extras.** Btrfs snapshots, Flatpak, gaming tweaks, the
   NVIDIA open driver, fingerprint login, TPM2 disk unlock and Secure Boot.
   Each is offered only when your hardware and earlier choices support it.
@@ -71,9 +76,10 @@ used when available.
 
 ## The installer
 
-The live ISO opens the graphical installer on the first console. It falls back
-to the text installer when no display device exists, and the boot menu has a
-"with text installer" entry to force it.
+The live ISO starts a Plasma desktop with the graphical installer open. With
+too little memory or no working graphics it shows the installer alone, and
+without a display device the text installer. The boot menu has "with
+installer only" and "with text installer" entries to choose directly.
 
 | Persona | What you get |
 | --- | --- |
@@ -83,7 +89,7 @@ to the text installer when no display device exists, and the boot menu has a
 | **Server** | Headless system with key-only SSH, firewalld, the LTS kernel and Podman or Docker; optional Cockpit, Netdata and fail2ban |
 | **Minimal** | Console-only system with no desktop and the fewest packages |
 
-The installer walks through keyboard, network (with a Wi-Fi picker), persona
+The installer walks through keyboard, pre-flight checks, network (with a Wi-Fi picker), persona
 and apps, disk and storage, extras, users and system settings, then a review
 screen. Before touching a disk, it names exactly what will be lost: the GUI
 lists every affected partition and needs a ticked acknowledgement, and the
@@ -125,6 +131,16 @@ PROTOGENOS_FAST_BUILD=1 ./scripts/docker-build
 > The build container runs with `--privileged` because Archiso creates mounts.
 > Only build from source you trust.
 
+### Proxmox LXC template
+
+```bash
+./scripts/build-lxc     # out/protogenos-server_YYYYMMDD-1_amd64.tar.zst
+./scripts/test-lxc --host root@pve
+```
+
+A headless server container with Docker ready to run. See
+[`docs/lxc.md`](docs/lxc.md).
+
 ### On Arch Linux
 
 ```bash
@@ -158,7 +174,7 @@ instead of running them. The frontend uses [Bun](https://bun.sh).
 installer/      Python installer: backend, text front ends, web API
 installer-web/  React + TypeScript graphical installer
 profiles/       Persona package sets and selectable app options
-overlays/       Files copied into the live ISO's filesystem
+overlays/       Files copied into the live ISO and LXC template filesystems
 config/         Shared release inputs, such as the theme palette
 scripts/        Build, QEMU and installer helper scripts
 docker/         Archiso builder image
@@ -175,6 +191,7 @@ docs/           Design decisions and reference documentation
 | --- | --- |
 | [Installer architecture](docs/installer.md) | Front ends, API, install steps, storage, extras, safety |
 | [Installer roadmap](docs/installer-roadmap.md) | What is done, what is open, known gaps |
+| [Proxmox LXC template](docs/lxc.md) | Building, using and testing the container template |
 | [Script reference](docs/scripts.md) | Every build, QEMU and installer script |
 | [Vision](docs/vision.md) | Identity, product principles, open decisions |
 | [Visual direction](docs/theme.md) | Color palette and artwork policy |

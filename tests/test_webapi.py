@@ -150,6 +150,58 @@ class WebApiTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=5)
 
+    def test_desktop_session_applies_layout_without_restarting(self) -> None:
+        applied: list[tuple[str, str, str]] = []
+        state = Path(self.temporary.name) / "state" / "keyboard"
+        server = create_server(
+            profiles_dir=Path(__file__).resolve().parents[1] / "profiles",
+            dist_dir=self.dist_dir,
+            keyboard_state=state,
+            desktop_user="live",
+            desktop_keyboard=lambda *args: applied.append(args),
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            host, port = server.server_address[:2]
+            with patch("protogenos_installer.webapi.subprocess.run"):
+                status, payload = _request(
+                    f"http://{host}:{port}/api/keyboard",
+                    method="POST",
+                    body={"layout": "de", "variant": "nodeadkeys"},
+                )
+            self.assertEqual(status, 200)
+            self.assertFalse(payload["restart"])
+            self.assertEqual(applied, [("live", "de", "nodeadkeys")])
+            self.assertFalse((state.parent / "restart").exists())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_preflight_reports_checks(self) -> None:
+        from protogenos_installer.preflight import Check
+
+        server = create_server(
+            profiles_dir=Path(__file__).resolve().parents[1] / "profiles",
+            dist_dir=self.dist_dir,
+            preflight=lambda: [Check("power", "warning", "Running on battery (50%)")],
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            host, port = server.server_address[:2]
+            status, payload = _request(f"http://{host}:{port}/api/preflight")
+            self.assertEqual(status, 200)
+            self.assertEqual(
+                payload["checks"],
+                [{"id": "power", "status": "warning", "title": "Running on battery (50%)", "detail": ""}],
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
     def test_options_requires_persona(self) -> None:
         status, payload = _request(f"{self.base_url}/api/options")
         self.assertEqual(status, 400)

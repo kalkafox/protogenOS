@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import asdict, dataclass
 
 COUNTRY_PATTERN = re.compile(r"^[A-Za-z][A-Za-z .,'()-]{0,63}$")
@@ -35,31 +36,50 @@ def parse_reflector_countries(output: str) -> tuple[MirrorCountry, ...]:
 PARALLEL_DOWNLOADS = 15
 
 
-def reflector_command(country: str = "", mirrorlist: str = "/etc/pacman.d/mirrorlist") -> list[str]:
-    """Rank recently synced HTTPS mirrors by measured speed, worldwide or in one country."""
-    command = ["reflector"]
+# Measure the 50 most recently synced HTTPS mirrors (in the country, or
+# worldwide) and keep the 10 fastest, fastest first. Measuring every mirror
+# would take minutes; 50 in parallel finishes in well under a minute.
+def reflector_options(country: str = "") -> list[str]:
+    """Options that rank recently synced HTTPS mirrors by measured speed."""
+    options: list[str] = []
     if country:
-        command += ["--country", country]
-    return command + [
+        options += ["--country", country]
+    return options + [
         "--protocol",
         "https",
         "--age",
         "12",
         "--latest",
-        "30",
+        "50",
         "--fastest",
         "10",
         "--sort",
         "rate",
         "--threads",
-        "8",
+        "16",
         "--connection-timeout",
         "5",
         "--download-timeout",
         "5",
-        "--save",
-        mirrorlist,
     ]
+
+
+def reflector_command(country: str = "", mirrorlist: str = "/etc/pacman.d/mirrorlist") -> list[str]:
+    """Rank recently synced HTTPS mirrors by measured speed, worldwide or in one country."""
+    return ["reflector", *reflector_options(country), "--save", mirrorlist]
+
+
+def reflector_config(country: str = "") -> str:
+    """reflector.conf for reflector.timer: the installer's speed ranking, kept fresh."""
+    options = reflector_options(country)
+    lines = ["# Written by the protogenOS installer: rank mirrors by measured speed."]
+    index = 0
+    while index < len(options):
+        option, value = options[index], options[index + 1]
+        lines.append(f"{option} {shlex.quote(value)}")
+        index += 2
+    lines.append("--save /etc/pacman.d/mirrorlist")
+    return "\n".join(lines) + "\n"
 
 
 def enable_parallel_downloads(config: str, count: int = PARALLEL_DOWNLOADS) -> str:

@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Open the graphical installer as a window in the live Plasma desktop. The
+# installer API runs as root in protogenos-installer-api.service; this script
+# runs as the live user and shows the GUI in a toolbar-less Firefox window.
+
+port="${PROTOGENOS_WEB_PORT:-8765}"
+url="http://127.0.0.1:${port}/"
+state_home="${XDG_STATE_HOME:-${HOME}/.local/state}/protogenos-installer"
+browser_profile="${state_home}/firefox"
+log_file="${state_home}/app.log"
+
+notify_failure() {
+    local message="$1"
+    echo "protogenos-installer-app: ${message}" >&2
+    if command -v kdialog >/dev/null 2>&1; then
+        kdialog --title "protogenOS installer" --error \
+            "${message}<br><br>Run <tt>sudo protogenos-install</tt> in Konsole for the text installer." \
+            >/dev/null 2>&1 || true
+    fi
+    exit 1
+}
+
+install -d -m 0700 "${state_home}"
+
+if ! curl -sf "${url}api/personas" >/dev/null 2>&1; then
+    sudo -n systemctl start protogenos-installer-api.service \
+        || notify_failure "Could not start the installer service."
+    # Python startup can take several seconds on slow media.
+    api_ready=false
+    for _ in $(seq 1 300); do
+        if curl -sf "${url}api/personas" >/dev/null 2>&1; then
+            api_ready=true
+            break
+        fi
+        sleep 0.1
+    done
+    [[ "${api_ready}" == true ]] \
+        || notify_failure "The installer service did not start. See: journalctl -u protogenos-installer-api"
+fi
+
+# A dedicated profile without toolbars makes Firefox look like an application
+# window. Reopening while it runs hands the URL to the existing instance.
+if [[ ! -f "${browser_profile}/user.js" ]]; then
+    install -d -m 0700 "${browser_profile}/chrome"
+    cat > "${browser_profile}/user.js" <<'EOF'
+user_pref("app.update.auto", false);
+user_pref("app.update.enabled", false);
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.startup.firstrunSkipsHomepage", true);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("browser.tabs.inTitlebar", 0);
+user_pref("browser.tabs.warnOnClose", false);
+user_pref("browser.translations.automaticallyPopup", false);
+user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("datareporting.policy.firstRunURL", "");
+user_pref("extensions.pocket.enabled", false);
+user_pref("startup.homepage_welcome_url", "");
+user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);
+user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
+EOF
+    cat > "${browser_profile}/chrome/userChrome.css" <<'EOF'
+#TabsToolbar, #nav-bar, #PersonalToolbar, #sidebar-box, #sidebar-main,
+#titlebar, #toolbar-menubar { visibility: collapse !important; }
+EOF
+fi
+
+export MOZ_ENABLE_WAYLAND=1
+exec firefox --name protogenos-installer --profile "${browser_profile}" "${url}" \
+    >> "${log_file}" 2>&1

@@ -19,8 +19,6 @@ fi
 
 cp -a "${source_profile}" "${target_profile}"
 cp -a "${project_root}/overlays/airootfs/." "${target_profile}/airootfs/"
-printf '\nsource /usr/local/share/protogenos/zlogin\n' \
-    >> "${target_profile}/airootfs/root/.zlogin"
 
 # Ship the installer in a stable location so the live-session command works.
 install -d \
@@ -40,6 +38,10 @@ install -m 0755 "${project_root}/scripts/protogenos-install-web" \
     "${target_profile}/airootfs/opt/protogenos/scripts/protogenos-install-web"
 ln -s /opt/protogenos/scripts/protogenos-install-web \
     "${target_profile}/airootfs/usr/local/bin/protogenos-install-web"
+install -m 0755 "${project_root}/scripts/protogenos-installer-app" \
+    "${target_profile}/airootfs/opt/protogenos/scripts/protogenos-installer-app"
+ln -s /opt/protogenos/scripts/protogenos-installer-app \
+    "${target_profile}/airootfs/usr/local/bin/protogenos-installer-app"
 
 # Build and ship the web GUI's static assets, unless explicitly skipped for
 # local CLI/TUI-only iteration on a machine without bun installed.
@@ -62,17 +64,35 @@ install -Dm644 "${fetch_assets}/neofetch.conf" "${target_profile}/airootfs/root/
 
 # Keep the installer's live-environment dependencies explicit instead of
 # depending on the current contents of Archiso's releng package list.
+# ntfsprogs (ntfsresize) shrinks Windows partitions to install alongside.
 # cage/firefox/seatd/mesa/curl back the web GUI installer; mesa provides the
 # llvmpipe software rasterizer so it still renders under VM display devices
 # (virtio-gpu, QXL, VMware, VirtualBox) with no 3D acceleration exposed. It
 # falls back to the TUI below (via protogenos-install-web's own checks, and
 # zlogin's boot-cmdline override) on machines with no DRM device at all.
 for package in python arch-install-scripts dosfstools e2fsprogs parted \
-    cage firefox seatd mesa curl fastfetch; do
+    cage firefox seatd mesa curl fastfetch ntfsprogs; do
     if ! grep -qxF "${package}" "${target_profile}/packages.x86_64"; then
         printf '%s\n' "${package}" >> "${target_profile}/packages.x86_64"
     fi
 done
+
+# The live desktop: a trimmed Plasma session (about 310 MiB of packages
+# instead of plasma-meta's full set) with the installer as a window. The
+# live system keeps Archiso's iwd/systemd-networkd networking, which the
+# installer's network screen drives. PROTOGENOS_NO_LIVE_DESKTOP=1 leaves it
+# out; the live session then always uses the kiosk installer.
+if [[ "${PROTOGENOS_NO_LIVE_DESKTOP:-}" != "1" ]]; then
+    for package in plasma-desktop kwin breeze kscreen powerdevil plasma-pa \
+        xdg-desktop-portal-kde qt6-wayland pipewire pipewire-pulse wireplumber \
+        noto-fonts konsole dolphin kdialog partitionmanager; do
+        if ! grep -qxF "${package}" "${target_profile}/packages.x86_64"; then
+            printf '%s\n' "${package}" >> "${target_profile}/packages.x86_64"
+        fi
+    done
+else
+    echo "PROTOGENOS_NO_LIVE_DESKTOP=1: leaving out the live Plasma desktop." >&2
+fi
 
 # cage gets DRM/input access through this seatd instance (or logind). Don't
 # wrap cage in seatd-launch: it refuses to start while this service owns
@@ -96,6 +116,27 @@ done < <(find \
 
 "${project_root}/scripts/add-installer-boot-entries" "${target_profile}"
 
+# Boot splash: the same Plymouth theme installed desktops get, in the live
+# initramfs right after udev, plus the BIOS boot menu background. The art is
+# drawn by the installer's own generator, so it needs Python on the build host.
+if ! grep -qxF plymouth "${target_profile}/packages.x86_64"; then
+    printf '%s\n' plymouth >> "${target_profile}/packages.x86_64"
+fi
+boot_art() {
+    PYTHONPATH="${project_root}/installer" python -m protogenos_installer.boot_art "$@"
+}
+boot_art plymouth "${target_profile}/airootfs/usr/share/plymouth/themes/protogenos"
+install -d "${target_profile}/airootfs/etc/plymouth"
+printf '[Daemon]\nTheme=protogenos\nShowDelay=0\n' \
+    > "${target_profile}/airootfs/etc/plymouth/plymouthd.conf"
+archiso_hooks="${target_profile}/airootfs/etc/mkinitcpio.conf.d/archiso.conf"
+sed -i 's/^HOOKS=(base udev /HOOKS=(base udev plymouth /' "${archiso_hooks}"
+if ! grep -q ' plymouth ' "${archiso_hooks}"; then
+    echo "could not add the plymouth hook to ${archiso_hooks}" >&2
+    exit 1
+fi
+boot_art syslinux "${target_profile}/syslinux/splash.png"
+
 profile_definition="${target_profile}/profiledef.sh"
 sed -i \
     -e 's/^iso_name=.*/iso_name="protogenos"/' \
@@ -105,6 +146,10 @@ sed -i \
     -e 's/^install_dir=.*/install_dir="protogenos"/' \
     -e '/^file_permissions=(/a\  ["/opt/protogenos/scripts/protogenos-install"]="0:0:755"' \
     -e '/^file_permissions=(/a\  ["/opt/protogenos/scripts/protogenos-install-web"]="0:0:755"' \
+    -e '/^file_permissions=(/a\  ["/opt/protogenos/scripts/protogenos-installer-app"]="0:0:755"' \
+    -e '/^file_permissions=(/a\  ["/etc/sudoers.d"]="0:0:750"' \
+    -e '/^file_permissions=(/a\  ["/etc/sudoers.d/protogenos-live"]="0:0:440"' \
+    -e '/^file_permissions=(/a\  ["/home/live/"]="1000:1000:750"' \
     "${profile_definition}"
 
 # Downloads dominate cold builds; releng ships only 5 parallel downloads.

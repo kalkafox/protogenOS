@@ -28,12 +28,19 @@ const FATE_LEGEND: Record<Fate, string> = {
 // Gaps smaller than this are alignment slack, not usable free space.
 const MIN_GAP = 16 * 1024 ** 2
 
+export interface ShrinkPreview {
+  partition: string
+  // Size the partition keeps; the rest of it goes to protogenOS.
+  newSize: number
+}
+
 function segmentsFor(
   layout: DiskLayout,
   kind: DiskLayoutKind,
   rootPartition: string,
   bootPartition: string,
-  formatBoot: boolean
+  formatBoot: boolean,
+  shrink: ShrinkPreview | null
 ): Segment[] {
   if (kind === "erase") {
     return [{ key: "new", start: 0, size: layout.size, label: "protogenOS", fate: "new" }]
@@ -48,6 +55,18 @@ function segmentsFor(
     const replaced =
       kind === "partitions" && (part.path === rootPartition || (formatBoot && part.path === bootPartition))
     const name = part.label || part.fstype || part.path.replace(/^\/dev\//, "")
+    if (kind === "free-space" && shrink && part.path === shrink.partition) {
+      segments.push({ key: part.path, start: part.start, size: shrink.newSize, label: name, fate: "kept" })
+      segments.push({
+        key: `${part.path}-freed`,
+        start: part.start + shrink.newSize,
+        size: part.size - shrink.newSize,
+        label: "protogenOS",
+        fate: "new",
+      })
+      cursor = Math.max(cursor, part.end + 1)
+      continue
+    }
     segments.push({
       key: part.path,
       start: part.start,
@@ -60,7 +79,7 @@ function segmentsFor(
   if (layout.size - cursor >= MIN_GAP) {
     segments.push({ key: `gap-${cursor}`, start: cursor, size: layout.size - cursor, label: "free", fate: "free" })
   }
-  if (kind === "free-space") {
+  if (kind === "free-space" && !shrink) {
     // The installer uses the largest unallocated region.
     const largest = segments
       .filter((segment) => segment.fate === "free")
@@ -79,14 +98,16 @@ export function PartitionBar({
   rootPartition = "",
   bootPartition = "",
   formatBoot = false,
+  shrink = null,
 }: {
   layout: DiskLayout
   kind: DiskLayoutKind
   rootPartition?: string
   bootPartition?: string
   formatBoot?: boolean
+  shrink?: ShrinkPreview | null
 }) {
-  const segments = segmentsFor(layout, kind, rootPartition, bootPartition, formatBoot)
+  const segments = segmentsFor(layout, kind, rootPartition, bootPartition, formatBoot, shrink)
   const fates = [...new Set(segments.map((segment) => segment.fate))]
   return (
     <div className="flex flex-col gap-1.5">

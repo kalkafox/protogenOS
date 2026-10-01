@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Install protogenOS
+GenericName=System installer
+Comment=Install protogenOS on this computer
+Exec=protogenos-installer-app
+Icon=system-software-install
+Terminal=false
+Categories=System;
+StartupWMClass=protogenos-installer

@@ -1,0 +1,8 @@
+[Unit]
+Description=protogenOS installer API for the live desktop
+Documentation=file:///usr/share/protogenos/README
+
+[Service]
+Environment=PYTHONPATH=/opt/protogenos/installer
+ExecStart=/usr/bin/python -m protogenos_installer.webapi --port 8765 --desktop-user live
+Restart=on-failure

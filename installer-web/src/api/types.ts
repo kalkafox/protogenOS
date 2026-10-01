@@ -132,6 +132,9 @@ export interface DiskChoice {
   boot_partition: string | null
   format_boot: boolean
   disk_partitioned: boolean
+  // free-space only: shrink this partition to shrink_size bytes first.
+  shrink_partition: string | null
+  shrink_size: number
 }
 
 export interface StorageChoice {
@@ -200,4 +203,33 @@ export interface InstallStatus {
 
 export interface ApiErrorBody {
   error: string
+}
+
+export type PrefetchState = "idle" | "preparing" | "downloading" | "done" | "skipped" | "failed" | "stopped"
+
+export interface PrefetchStatus {
+  state: PrefetchState
+  packages?: number
+  total_bytes?: number
+  // The part of total_bytes that fits in free memory.
+  planned_bytes?: number
+  downloaded_bytes?: number
+  reason?: string
+}
+
+export interface PreflightCheck {
+  id: string
+  status: "ok" | "warning" | "error"
+  title: string
+  detail: string
+}
+
+export interface ShrinkInfo {
+  partition: string
+  fstype: string
+  size: number
+  smallest_size: number
+  largest_room: number
+  shrinkable: boolean
+  reason: string
 }

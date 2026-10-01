@@ -1,0 +1,9 @@
+[KDE]
+LookAndFeel=org.kde.breezedark.desktop
+widgetStyle=Breeze
+
+[General]
+ColorScheme=BreezeDark
+
+[Icons]
+Theme=breeze-dark

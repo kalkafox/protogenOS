@@ -1,0 +1,3 @@
+# The live medium has no secrets to protect: like Arch's passwordless root
+# login, the live user may run anything, including the installer, as root.
+live ALL=(ALL:ALL) NOPASSWD: ALL

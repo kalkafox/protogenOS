@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
+from . import boot_art
 from . import bootloader as boot
 from .config_io import export_config
 from .hardware import VENDOR_NVIDIA, HardwareProfile, detect_hardware, read_efi_flag
@@ -25,8 +26,14 @@ from .keyboard import (
     vconsole_conf,
     x11_keyboard_conf,
 )
-from .mirrors import COUNTRY_PATTERN, enable_parallel_downloads, reflector_command
+from .mirrors import (
+    COUNTRY_PATTERN,
+    enable_parallel_downloads,
+    reflector_command,
+    reflector_config,
+)
 from .models import InstallPlan
+from .prefetch import copy_prefetched
 from .network import (
     IWD_STORAGE,
     is_online,
@@ -200,6 +207,10 @@ class InstallConfig:
     root_partition: str | None = None
     boot_partition: str | None = None
     format_boot: bool = False
+    # free-space only: shrink this NTFS or ext4 partition to shrink_size
+    # bytes first, freeing room at its end.
+    shrink_partition: str | None = None
+    shrink_size: int = 0
     encrypt: bool = False
     encryption_passphrase: str | None = field(default=None, repr=False)
     bootloader: str = "grub"
@@ -346,6 +357,13 @@ class InstallConfig:
                     raise InstallError(f"{partition} is not a partition of {self.disk}")
             if self.root_partition == self.boot_partition:
                 raise InstallError("root and EFI system partitions must be different")
+        if self.shrink_partition:
+            if self.disk_layout != "free-space":
+                raise InstallError("shrinking a partition only applies to installing alongside")
+            if not self.shrink_partition.startswith(self.disk) or self.shrink_partition == self.disk:
+                raise InstallError(f"{self.shrink_partition} is not a partition of {self.disk}")
+            if not isinstance(self.shrink_size, int) or self.shrink_size <= 0:
+                raise InstallError("choose how small the shrunk partition should become")
         if self.encrypt:
             passphrase = self.encryption_passphrase or ""
             if len(passphrase) < 8:
@@ -476,6 +494,42 @@ def directory_size(path: Path) -> int:
     return total
 
 
+def shows_boot_splash(plan: InstallPlan) -> bool:
+    """Desktop personas boot behind the Plymouth splash; headless ones show logs."""
+    return plan.desktop
+
+
+def keeps_mirrors_ranked(plan: InstallPlan) -> bool:
+    """Minimal skips reflector (and the Python it needs); others re-rank weekly."""
+    return plan.persona != "minimal"
+
+
+# Every desktop persona gets these on top of its package list.
+DESKTOP_EXTRA_PACKAGES = ("sudo", "nano", "man-db", "bash-completion")
+
+
+def prefetch_packages(
+    plan: InstallPlan, hardware: HardwareProfile | None = None
+) -> tuple[str, ...]:
+    """Packages worth downloading before the remaining choices are made.
+
+    Covers the plan and detected hardware; the few packages that depend on
+    later choices (filesystem tools, bootloader, extras) download during
+    the installation itself.
+    """
+    aur = set(plan.aur_packages)
+    packages = [package for package in plan.packages if package not in aur]
+    if plan.desktop:
+        packages.extend(DESKTOP_EXTRA_PACKAGES)
+    if keeps_mirrors_ranked(plan):
+        packages.append("reflector")
+    if hardware is not None:
+        packages.extend(hardware.packages)
+    if plan.aur_packages:
+        packages.extend(("base-devel", "git"))
+    return _unique(packages)
+
+
 class DownloadHeartbeat:
     """Periodically emit the size of a download directory from a thread."""
 
@@ -501,20 +555,14 @@ class DownloadHeartbeat:
         self._thread.join()
 
     def _loop(self) -> None:
-        last_size = -1
-        unchanged = 0.0
+        last_emitted = -1
         while not self._stop.wait(self.interval):
             size = directory_size(self.path)
-            if size == last_size:
-                unchanged += self.interval
-                # Also true while pacman unpacks already-downloaded packages.
-                self.emit(
-                    f"Package cache: {format_size(size)} (unchanged for {unchanged:.0f}s)"
-                )
-            else:
-                unchanged = 0.0
+            # Also true while pacman unpacks already-downloaded packages;
+            # skip re-printing the same size every interval while it holds.
+            if size != last_emitted:
                 self.emit(f"Package cache: {format_size(size)} downloaded so far")
-            last_size = size
+                last_emitted = size
 
 
 def _mounted_paths(device: dict[str, object]) -> Iterable[str]:
@@ -706,6 +754,9 @@ class InstallerBackend:
         secure_boot_setup_mode: Callable[[], bool] = lambda: bool(read_efi_flag("SetupMode")),
         iwd_storage: Path = IWD_STORAGE,
         keymap_resolver: Callable[[str, str], str] = console_keymap,
+        prefetched_packages: Sequence[Path] = (),
+        ranked_mirrorlist: Path | None = None,
+        live_mirrorlist: Path = Path("/etc/pacman.d/mirrorlist"),
     ) -> None:
         if target_root is None:
             # Dry-run defaults to a throwaway directory so it's safe even if
@@ -726,6 +777,9 @@ class InstallerBackend:
         self.secure_boot_setup_mode = secure_boot_setup_mode
         self.iwd_storage = iwd_storage
         self.keymap_resolver = keymap_resolver
+        self.prefetched_packages = tuple(prefetched_packages)
+        self.ranked_mirrorlist = ranked_mirrorlist
+        self.live_mirrorlist = live_mirrorlist
         self.warnings: list[str] = []
         self._step_index = 0
         self._step_total = 0
@@ -781,7 +835,7 @@ class InstallerBackend:
             self._step("Installing the bootloader")
             # Bootloader goes before optional AUR builds so a failed build
             # can never leave an unbootable system behind.
-            self._configure_initramfs(config)
+            self._configure_initramfs(plan, config)
             self._install_bootloader(plan, config, prepared)
             if config.secure_boot:
                 self._configure_secure_boot(plan, config)
@@ -829,6 +883,8 @@ class InstallerBackend:
         commands += FILESYSTEM_TOOLS[config.filesystem]
         if config.encrypt:
             commands.append("cryptsetup")
+        if config.shrink_partition:
+            commands += ["sfdisk", "ntfsresize", "resize2fs", "e2fsck", "dumpe2fs"]
         return tuple(commands)
 
     def _validate_environment(self, config: InstallConfig) -> None:
@@ -903,6 +959,12 @@ class InstallerBackend:
     # -- packages ---------------------------------------------------------
 
     def _select_mirrors(self, config: InstallConfig) -> None:
+        # The background download already ranked mirrors worldwide.
+        ranked = self.ranked_mirrorlist
+        if not config.mirror_country and not self.dry_run and ranked is not None and ranked.is_file():
+            shutil.copyfile(ranked, self.live_mirrorlist)
+            self.runner.emit("Using the mirrors ranked for the background download")
+            return
         # Without a country, rank mirrors worldwide; the live ISO otherwise
         # uses its full, unranked mirror list.
         result = self.runner.run(reflector_command(config.mirror_country), check=False)
@@ -927,8 +989,12 @@ class InstallerBackend:
         aur = set(plan.aur_packages)
         packages = [package for package in plan.packages if package not in aur]
         if plan.desktop:
-            packages.extend(("sudo", "nano", "man-db", "bash-completion"))
-        else:
+            packages.extend(DESKTOP_EXTRA_PACKAGES)
+        if keeps_mirrors_ranked(plan):
+            packages.append("reflector")
+        if shows_boot_splash(plan):
+            packages.append("plymouth")
+        if not plan.desktop:
             # Minimal keeps only an editor, plus sudo when an account needs it.
             packages.append("nano")
             if config.grant_sudo or any(user.sudo for user in config.additional_users):
@@ -966,6 +1032,12 @@ class InstallerBackend:
                 temporary_path = file.name
             # pacstrap without -c downloads into the target's own cache.
             cache = self.target_root / "var/cache/pacman/pkg"
+            if self.prefetched_packages and not self.dry_run:
+                count, size = copy_prefetched(self.prefetched_packages, cache)
+                if count:
+                    self.runner.emit(
+                        f"Reusing {count} packages downloaded ahead ({format_size(size)})"
+                    )
             with DownloadHeartbeat(self.runner.emit, cache):
                 self.runner.run(
                     [
@@ -1075,6 +1147,13 @@ class InstallerBackend:
         self._create_users(config)
         self._configure_features(plan, config)
         self._enable_services(hardware, desktop=plan.desktop)
+        if keeps_mirrors_ranked(plan):
+            # Mirrors change speed and go out of sync; re-rank weekly the
+            # same way the installer did.
+            self._write_target(
+                "etc/xdg/reflector/reflector.conf", reflector_config(config.mirror_country)
+            )
+            self._chroot("systemctl", "enable", "reflector.timer")
         if config.serial_console:
             self._chroot("systemctl", "enable", "serial-getty@ttyS0.service")
 
@@ -1265,11 +1344,22 @@ class InstallerBackend:
 
     # -- initramfs and bootloader -----------------------------------------
 
-    def _configure_initramfs(self, config: InstallConfig) -> None:
-        if not config.encrypt and config.nvidia_driver != "nvidia-open":
+    def _configure_initramfs(self, plan: InstallPlan, config: InstallConfig) -> None:
+        splash = shows_boot_splash(plan)
+        if not config.encrypt and config.nvidia_driver != "nvidia-open" and not splash:
             return
         path = self.target_root / "etc/mkinitcpio.conf"
         content = path.read_text()
+        if splash:
+            # The theme must exist before mkinitcpio copies it into the initramfs.
+            boot_art.write_plymouth_theme(
+                self.target_root / boot_art.PLYMOUTH_THEME_DIR.lstrip("/")
+            )
+            self._write_target(
+                "etc/plymouth/plymouthd.conf",
+                f"[Daemon]\nTheme={boot_art.PLYMOUTH_THEME}\nShowDelay=0\n",
+            )
+            content = boot.add_plymouth_hook(content)
         if config.encrypt:
             content = boot.add_encrypt_hook(content)
         if config.nvidia_driver == "nvidia-open":
@@ -1279,7 +1369,12 @@ class InstallerBackend:
         self._chroot("mkinitcpio", "-P")
 
     def _kernel_cmdline(
-        self, config: InstallConfig, prepared: PreparedStorage, *, include_root: bool = True
+        self,
+        config: InstallConfig,
+        prepared: PreparedStorage,
+        *,
+        include_root: bool = True,
+        splash: bool = False,
     ) -> str:
         mkinitcpio = self.target_root / "etc/mkinitcpio.conf"
         systemd_initramfs = not mkinitcpio.is_file() or boot.uses_systemd_initramfs(
@@ -1294,6 +1389,7 @@ class InstallerBackend:
             systemd_initramfs=systemd_initramfs,
             zram=config.swap == "zram",
             serial_console=config.serial_console,
+            splash=splash,
             include_root=include_root,
         )
 
@@ -1305,7 +1401,7 @@ class InstallerBackend:
         elif config.bootloader == "limine":
             self._install_limine(plan, config, prepared)
         else:
-            self._install_grub(config, prepared)
+            self._install_grub(plan, config, prepared)
 
     def _configure_secure_boot(self, plan: InstallPlan, config: InstallConfig) -> None:
         self._chroot("sbctl", "create-keys")
@@ -1361,10 +1457,21 @@ class InstallerBackend:
                 f"{prepared.root_partition}'"
             )
 
-    def _install_grub(self, config: InstallConfig, prepared: PreparedStorage) -> None:
+    def _install_grub(
+        self, plan: InstallPlan, config: InstallConfig, prepared: PreparedStorage
+    ) -> None:
         path = self.target_root / "etc/default/grub"
         content = path.read_text()
         content = boot.set_shell_variable(content, "GRUB_DISTRIBUTOR", "protogenOS")
+        if shows_boot_splash(plan):
+            content = boot.set_shell_variable(
+                content, "GRUB_CMDLINE_LINUX_DEFAULT", "loglevel=3 quiet splash"
+            )
+        if not config.serial_console:
+            boot_art.write_grub_theme(self.target_root / boot_art.GRUB_THEME_DIR.lstrip("/"))
+            content = boot.set_shell_variable(
+                content, "GRUB_THEME", f"{boot_art.GRUB_THEME_DIR}/theme.txt"
+            )
         extra = self._kernel_cmdline(config, prepared, include_root=False)
         if extra:
             content = boot.set_shell_variable(content, "GRUB_CMDLINE_LINUX", extra)
@@ -1417,7 +1524,7 @@ class InstallerBackend:
             self._warn("could not register a UEFI boot entry; relying on the fallback path")
             self._chroot("bootctl", "install", "--esp-path=/boot", "--no-variables")
         kernel = self.kernel_package(plan)
-        cmdline = self._kernel_cmdline(config, prepared)
+        cmdline = self._kernel_cmdline(config, prepared, splash=shows_boot_splash(plan))
         self._write_target("boot/loader/loader.conf", boot.systemd_boot_loader_conf())
         self._write_target("boot/loader/entries/protogenos.conf", boot.systemd_boot_entry(kernel, cmdline))
         if self._has_fallback_initramfs(kernel):
@@ -1439,7 +1546,7 @@ class InstallerBackend:
             "boot/limine.conf",
             boot.limine_conf(
                 kernel,
-                self._kernel_cmdline(config, prepared),
+                self._kernel_cmdline(config, prepared, splash=shows_boot_splash(plan)),
                 fallback=self._has_fallback_initramfs(kernel),
             ),
         )

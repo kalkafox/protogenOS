@@ -49,7 +49,7 @@ export function ErrorScreen({
 
         {lines.length > 0 && (
           <>
-            <LogView lines={lines} className="h-64" />
+            <LogView lines={lines} className="h-96" />
 
             {share.kind === "confirm" && (
               <div className="flex flex-col gap-3 rounded-md border p-3">

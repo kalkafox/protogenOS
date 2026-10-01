@@ -79,6 +79,34 @@ class MirrorTests(unittest.TestCase):
         country = reflector_command("Germany")
         self.assertEqual(country[country.index("--country") + 1], "Germany")
 
+    def test_reflector_timer_config_keeps_the_speed_ranking(self) -> None:
+        from protogenos_installer.mirrors import reflector_config
+
+        config = reflector_config("United States")
+        self.assertIn("--country 'United States'\n", config)
+        self.assertIn("--sort rate\n", config)
+        self.assertIn("--fastest 10\n", config)
+        self.assertTrue(config.endswith("--save /etc/pacman.d/mirrorlist\n"))
+        self.assertNotIn("--country", reflector_config())
+
+
+class SplashBootConfigTests(unittest.TestCase):
+    def test_plymouth_goes_before_encrypt_hooks(self) -> None:
+        from protogenos_installer.bootloader import add_encrypt_hook, add_plymouth_hook
+
+        conf = "HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block filesystems fsck)\n"
+        hooks = add_plymouth_hook(add_encrypt_hook(conf))
+        self.assertIn("base systemd plymouth autodetect", hooks)
+        self.assertLess(hooks.index("plymouth"), hooks.index("sd-encrypt"))
+        self.assertEqual(add_plymouth_hook(hooks), hooks)
+        legacy = add_plymouth_hook("HOOKS=(base udev autodetect block encrypt filesystems)\n")
+        self.assertIn("base udev plymouth autodetect", legacy)
+
+    def test_splash_parameters(self) -> None:
+        self.assertTrue(
+            kernel_cmdline(root_uuid="R", filesystem="ext4", splash=True).endswith("rw quiet splash")
+        )
+
 
 class BootConfigTests(unittest.TestCase):
     def test_legacy_initramfs_gets_encrypt_hook_and_keyboard(self) -> None:

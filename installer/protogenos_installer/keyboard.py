@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import pwd
 import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -127,3 +129,31 @@ def x11_keyboard_conf(layout: str, variant: str = "") -> str:
 
 def plasma_kxkbrc(layout: str, variant: str = "") -> str:
     return f"[Layout]\nLayoutList={layout}\nVariantList={variant}\nUse=true\n"
+
+
+def apply_plasma_layout(user: str, layout: str, variant: str = "") -> None:
+    """Switch a running Plasma session's keyboard layout (from root).
+
+    KWin watches kxkbrc through KConfigWatcher, which only reacts to the
+    change notifications that ``kwriteconfig6 --notify`` sends on the
+    session bus, so each key is written that way, as the session's user.
+    The variant goes first so the new layout never pairs with a stale one.
+    """
+    account = pwd.getpwnam(user)
+    environment = [
+        "env", "-i",
+        f"HOME={account.pw_dir}",
+        "PATH=/usr/bin",
+        "LANG=C.UTF-8",
+        f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{account.pw_uid}/bus",
+    ]
+    for key, value in (("VariantList", variant), ("LayoutList", layout), ("Use", "true")):
+        subprocess.run(
+            [
+                "runuser", "-u", user, "--", *environment,
+                "kwriteconfig6", "--notify", "--file", "kxkbrc",
+                "--group", "Layout", "--key", key, value,
+            ],
+            capture_output=True,
+            check=False,
+        )

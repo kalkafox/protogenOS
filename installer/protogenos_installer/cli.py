@@ -33,6 +33,7 @@ from .locales import suggest_locale
 from .mirrors import COUNTRY_PATTERN
 from .models import InstallPlan, OptionGroup
 from .network import is_online
+from .preflight import describe_problems, run_checks
 from .storage import GIB, MIN_ROOT_BYTES, read_disk_layout
 from .profiles import PERSONAS, ProfileError, ProfileRepository
 from .server import (
@@ -79,6 +80,16 @@ def _show_title() -> None:
     """Render the installer identity before any menus or plan output."""
     print(f"\n{INSTALLER_BANNER}")
     print(INSTALLER_TAGLINE)
+
+
+def _show_preflight() -> None:
+    """Warn about machine problems before any questions (they never block)."""
+    try:
+        problems = describe_problems(run_checks())
+    except Exception:  # noqa: BLE001 - checks are advisory
+        return
+    if problems:
+        print(f"\n{problems}")
 
 
 def _choose_persona() -> str | None:
@@ -610,6 +621,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         _show_title()
+        _show_preflight()
         repository = ProfileRepository(args.profiles_dir)
 
         preset_selections: dict[str, tuple[str, ...]] = {}

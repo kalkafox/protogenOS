@@ -14,9 +14,12 @@ import type {
 } from "@/api/types"
 
 import { LoadingText } from "@/components/ui/spinner"
+import { PrefetchBar } from "@/components/PrefetchBar"
+import { usePrefetch } from "@/lib/usePrefetch"
 import { EMPTY_SERVER } from "@/lib/server"
 
 import { KeyboardScreen } from "@/screens/KeyboardScreen"
+import { PreflightScreen } from "@/screens/PreflightScreen"
 import { NetworkScreen } from "@/screens/NetworkScreen"
 import { PersonaScreen } from "@/screens/PersonaScreen"
 import { OptionsScreen } from "@/screens/OptionsScreen"
@@ -34,6 +37,7 @@ import { ErrorScreen } from "@/screens/ErrorScreen"
 type Step =
   | "loading"
   | "keyboard"
+  | "preflight"
   | "network"
   | "persona"
   | "options"
@@ -71,7 +75,7 @@ function App() {
         setFirmware(info.firmware)
         setSystemInfo(info)
         setKeyboardChoice({ layout: current.layout, variant: current.variant })
-        setStep(current.applied ? "network" : "keyboard")
+        setStep(current.applied ? "preflight" : "keyboard")
       })
       .catch(() => setStep("keyboard"))
   }, [])
@@ -85,6 +89,10 @@ function App() {
     setError(message)
     setStep("error")
   }, [])
+
+  // Shown from the plan until installing, which takes the downloads over.
+  const prefetchActive = !["progress", "done", "error"].includes(step)
+  const prefetch = usePrefetch(plan, prefetchActive)
 
   const isServer = persona === "server"
   const buildConfig = useCallback(
@@ -136,6 +144,7 @@ function App() {
   return (
     <div className="mx-auto flex min-h-svh max-w-xl flex-col justify-center px-4 py-10">
       <h1 className="mb-6 text-center text-2xl font-semibold">protogenOS Installer</h1>
+      {prefetchActive && <PrefetchBar status={prefetch} />}
 
       {step === "loading" && <LoadingText className="justify-center">Loading…</LoadingText>}
 
@@ -143,9 +152,13 @@ function App() {
         <KeyboardScreen
           onNext={(layout, variant) => {
             setKeyboardChoice({ layout, variant })
-            setStep("network")
+            setStep("preflight")
           }}
         />
+      )}
+
+      {step === "preflight" && (
+        <PreflightScreen onBack={() => setStep("keyboard")} onNext={() => setStep("network")} />
       )}
 
       {step === "network" && <NetworkScreen onNext={goToPersona} />}
@@ -247,6 +260,7 @@ function App() {
         <ReviewScreen
           plan={plan}
           config={config}
+          prefetch={prefetch}
           onBack={() => setStep(isServer ? "server" : "config")}
           onInstall={handleInstall}
         />

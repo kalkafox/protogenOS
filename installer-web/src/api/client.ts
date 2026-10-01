@@ -11,6 +11,9 @@ import type {
   OptionGroup,
   NetworkStatus,
   Persona,
+  PreflightCheck,
+  ShrinkInfo,
+  PrefetchStatus,
   SystemInfo,
   WifiNetwork,
 } from "./types"
@@ -45,6 +48,14 @@ export function resolvePlan(
     method: "POST",
     body: JSON.stringify({ persona, selections }),
   })
+}
+
+export function getPreflight(): Promise<{ checks: PreflightCheck[] }> {
+  return request("/api/preflight")
+}
+
+export function getPrefetch(): Promise<PrefetchStatus> {
+  return request("/api/prefetch")
 }
 
 export function getSystem(): Promise<SystemInfo> {
@@ -94,6 +105,12 @@ export function setKeyboard(layout: string, variant: string): Promise<KeyboardSt
 
 export function getMirrorCountries(): Promise<{ countries: MirrorCountry[] }> {
   return request("/api/mirrors/countries")
+}
+
+export function getShrinkInfo(disk: string, partition: string): Promise<ShrinkInfo> {
+  return request(
+    `/api/disks/shrink?disk=${encodeURIComponent(disk)}&partition=${encodeURIComponent(partition)}`
+  )
 }
 
 export function getDiskLayout(disk: string): Promise<DiskLayout> {

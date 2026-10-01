@@ -5,16 +5,41 @@ The protogenOS installer is a Python package
 
 | Front end | Entry point | Used when |
 | --- | --- | --- |
-| Graphical | `protogenos-install-web` | Default on the live ISO when a DRM display device exists |
+| Graphical (live desktop) | `protogenos-installer-app` | Default: a window in the live Plasma session |
+| Graphical (kiosk) | `protogenos-install-web` | Live desktop unavailable (no Plasma, under 3.5 GB RAM, or Plasma fails within a minute), or `protogenos.installer=kiosk` |
 | Curses TUI | `protogenos-install` | No display device, the GUI fails to start, or `protogenos.installer=tui` is on the kernel command line |
 | Plain prompts | `protogenos-install --lo-fi` | Requested explicitly, or stdin/stdout is not a terminal |
 
-The live session's `zlogin` launches the GUI on `tty1` and falls back to the
-TUI if the GUI exits with an error. The ISO boot menu (systemd-boot, GRUB, and
-syslinux) has a "with text installer" entry that adds
-`protogenos.installer=tui`; `scripts/add-installer-boot-entries` creates it
-when the profile is prepared. Closing either returns to a shell, where
-both commands can be rerun.
+## Live session
+
+The live ISO logs in the unprivileged `live` user on `tty1` (created by
+`sysusers.d`, passwordless `sudo`, home shipped in the image). Its `zlogin`
+picks a mode from `protogenos.installer=` on the kernel command line, or
+automatically:
+
+| Mode | What starts | Fallback |
+| --- | --- | --- |
+| `desktop` (default) | A trimmed Plasma Wayland session (about 310 MiB of packages) with the installer open as a window and an "Install protogenOS" desktop icon | Kiosk if there is no DRM device, less than 3.5 GB of RAM, or Plasma exits with an error within a minute (log: `/tmp/protogenos-live-desktop.log`) |
+| `kiosk` | The installer alone in Firefox under `cage` | Text installer |
+| `tui` | The text installer | — |
+
+In the desktop, `protogenos-installer-app` starts
+`protogenos-installer-api.service` (the API as root, `--desktop-user live`;
+log in the journal) through sudo and opens a toolbar-less Firefox window.
+Keyboard layout changes apply to the running Plasma session through
+`kwriteconfig6 --notify` instead of restarting a compositor. The live system
+keeps Archiso's iwd and systemd-networkd networking, configured from the
+installer's network screen. While an installation runs, the API holds a
+`systemd-inhibit` lock so the machine doesn't suspend.
+
+The boot menu (systemd-boot, GRUB, and syslinux) has the default entry plus
+"with installer only" (`kiosk`) and "with text installer" (`tui`) entries,
+created by `scripts/add-installer-boot-entries`. The default and kiosk
+entries boot with `quiet splash` behind the Plymouth theme; the text entry
+shows boot messages. Leaving the installer drops to a root shell (kiosk and
+text modes) or the live user's shell (desktop mode); logging out restarts the
+session. `PROTOGENOS_NO_LIVE_DESKTOP=1 ./scripts/prepare-profile` builds an
+ISO without Plasma.
 
 ## Components
 
@@ -31,6 +56,10 @@ both commands can be rerun.
 - `features.py` — which extras the text front ends offer, and their defaults.
 - `locales.py` — locale suggestion from timezone and keyboard layout.
 - `logshare.py` — log upload for bug reports.
+- `prefetch.py` — background package downloads before installing.
+- `preflight.py` — machine checks shown before any choices.
+- `boot_art.py` — the Plymouth theme, GRUB theme, and ISO boot splash, drawn
+  with the standard library.
 - `bootloader.py`, `keyboard.py`, `network.py`, `mirrors.py`, `config_io.py` —
   focused helpers used by the backend and front ends.
 
@@ -40,7 +69,8 @@ both commands can be rerun.
 `/dev/dri/card*`, starts the API server, and opens Firefox in kiosk mode under
 the `cage` Wayland compositor. Its log is `/tmp/protogenos-install-web.log`.
 
-Screens, in order: keyboard, network, persona, options, AUR confirmation
+Screens, in order: keyboard, pre-flight checks (only when something needs
+attention), network, persona, options, AUR confirmation
 (only when AUR packages are selected), disk (with a partition bar showing
 what is kept, erased, and used), storage, extras, users and system, server
 access (Server persona only), review, progress, and done or error. The progress and error screens show the install
@@ -59,6 +89,9 @@ Main API routes:
 | `GET/POST /api/keyboard`, `GET /api/keyboard/layouts` | Keyboard layout |
 | `GET /api/network`, `POST /api/network/scan`, `POST /api/network/connect` | Connectivity and Wi-Fi |
 | `GET /api/disks`, `GET /api/disks/layout` | Target disks and their partitions |
+| `GET /api/disks/shrink?disk=&partition=` | How far an NTFS or ext4 partition can shrink |
+| `GET /api/preflight` | Pre-flight checks |
+| `GET /api/prefetch` | Background download progress |
 | `GET /api/timezones`, `GET /api/mirrors/countries` | System choices |
 | `GET /api/locales/suggest?timezone=&layout=` | Suggested locale |
 | `POST /api/config/validate` | Validate a configuration without installing; with `persona`, also persona-specific settings |
@@ -69,6 +102,54 @@ Main API routes:
 
 `/api/install/start` refuses plans containing AUR packages unless
 `aur_confirmed` is true, and refuses a second concurrent install.
+
+## Pre-flight checks
+
+Before any questions, every front end runs read-only checks from `/sys` and
+`/proc` and reports `ok`, `warning`, or `error`. The GUI shows them on their
+own screen only when something isn't `ok`; the text installers print them.
+None block installing, except that the GUI offers "Check again" instead of
+"Continue" when there is no usable disk.
+
+| Check | Warns or fails when |
+| --- | --- |
+| Disks | No installable disk (hint: switch the storage mode to AHCI), or every disk is under 16 GiB |
+| Memory | Under 2 GiB |
+| Power | On battery without a charger (stronger under 30%); peripheral batteries are ignored |
+| Firmware | Started in legacy BIOS mode, or Secure Boot is on |
+| Clock | The year is before 2026 (package signatures and TLS would fail) |
+| Wi-Fi driver | A PCI Wi-Fi adapter has no driver bound |
+| RAID mode | An Intel RAID/RST storage controller is present |
+
+## Background downloads
+
+When the GUI resolves a plan (after the persona and applications), the API
+starts downloading its packages, plus detected hardware packages, while the
+user picks disks and accounts:
+
+1. reflector ranks mirrors worldwide by speed (once per boot) into
+   `/tmp/protogenos-prefetch/mirrorlist`; the live mirror list is used if
+   that fails.
+2. pacman sizes the download with a separate, empty database, so it
+   resolves every dependency as a fresh system would and never touches the
+   live system's database.
+3. The cache is RAM-backed (`/tmp`), so the download is limited to free
+   memory minus 1 GiB and free `/tmp` space minus 256 MiB. If everything
+   doesn't fit, the largest packages that do are chosen (most bytes saved),
+   and `pacman -Sw --nodeps --nodeps` fetches exactly those into
+   `/tmp/protogenos-prefetch/pkg`; the rest download during installation.
+   On a 4 GB machine running the live desktop that is roughly 1.3 GB of a
+   General install's 1.75 GB. Signatures aren't checked here; pacstrap
+   verifies every package against the new system's keyring.
+
+A changed plan restarts the download and keeps finished files. A progress bar
+under the title follows it on every screen, says when only part fit or when
+everything will download during installation (with the reason), and the
+review screen summarizes it. Starting the install stops the download, moves
+the finished packages into the target's cache before `pacstrap` (freeing
+their memory), and, when no mirror
+country was chosen, reuses the ranked mirror list instead of ranking again.
+`--no-prefetch` (or `--dry-run`) on the API turns it off.
 
 For development, `scripts/dev-web-installer` runs the API with `--dry-run`
 alongside the Vite dev server; `scripts/build-frontend` builds `dist/`.
@@ -163,17 +244,19 @@ The backend reports numbered steps to every front end:
    is an unmounted block device, `/mnt` free, the live medium excluded.
 2. **Preparing disks** — partition, optionally encrypt, format, and mount.
 3. **Installing packages** — rank mirrors with reflector (the 10 fastest of
-   the 30 most recently synced HTTPS mirrors, in the chosen country or
-   worldwide; the default list is kept if ranking fails), refresh the Arch
+   the 50 most recently synced HTTPS mirrors, in the chosen country or
+   worldwide; the default list is kept if ranking fails, and the background
+   download's worldwide ranking is reused without a country), refresh the Arch
    keyring, set ParallelDownloads to 15 (and enable multilib when needed), write `vconsole.conf`, run `pacstrap` with download progress,
    and generate `fstab`.
 4. **Configuring the system** — locale, timezone, hostname, branding
    (`os-release`, `issue`, `motd`), users and sudo, keyboard for X11 and
    Plasma, desktop theming, zram, extras (snapper, Flathub, GameMode),
-   enabled services, and Wi-Fi networks copied from the live session into
-   NetworkManager.
-5. **Installing the bootloader** — initramfs hooks (LUKS unlock prompt, no
-   `kms` with the NVIDIA driver), the chosen bootloader, then Secure Boot
+   enabled services, a weekly `reflector.timer` that re-ranks mirrors by
+   speed with the same options (all personas except Minimal), and Wi-Fi
+   networks copied from the live session into NetworkManager.
+5. **Installing the bootloader** — initramfs hooks (Plymouth splash on
+   desktop personas, LUKS unlock prompt, no `kms` with the NVIDIA driver), the chosen bootloader, then Secure Boot
    signing and TPM2 enrollment when selected.
 6. **Building AUR packages** — only when selected; see below.
 7. **Finishing up** — take the initial snapshot, copy the install log and
@@ -187,6 +270,7 @@ Mounts are cleaned up recursively after success or failure.
 | --- | --- | --- |
 | Erase | Wipe the disk and create a new GPT table | — |
 | Free space | Create an ESP and root in the largest unallocated region; existing partitions are untouched | UEFI, GPT, at least 17 GiB free |
+| Free space after shrinking (GUI: "Make room by shrinking a partition") | Shrink an NTFS or ext4 partition from its end, then install into the freed space as above | UEFI, GPT, the shrink must free at least 17 GiB |
 | Existing partitions | Format a chosen root partition and reuse an existing ESP | UEFI, GPT, root at least 16 GiB and unmounted |
 
 Erase layout partitions:
@@ -196,6 +280,15 @@ Erase layout partitions:
 | UEFI | 1 GiB FAT32 ESP (mounted at `/boot`), root |
 | BIOS | 2 MiB BIOS boot, root |
 | BIOS with LUKS or F2FS | 2 MiB BIOS boot, 1 GiB ext4 `/boot`, root |
+
+Shrinking (`shrink_partition` and `shrink_size`, the partition's new size
+in bytes, rounded down to whole MiB) measures the smallest possible size
+first: `ntfsresize --info` for NTFS, `resize2fs -P` with `dumpe2fs` for ext4.
+The partition keeps at least that plus 2 GiB. NTFS is shrunk with an
+`ntfsresize --no-action` test run followed by the real resize; ext4 with
+`e2fsck -f -p` and `resize2fs`. Then `sfdisk -N` shortens the partition,
+keeping its start, so no data moves. BitLocker, mounted, hibernated (or Fast
+Startup), and chkdsk-flagged partitions are refused with an explanation.
 
 Filesystems: Btrfs (default), ext4, XFS, or F2FS. Btrfs is mounted with
 `compress=zstd:1,noatime` and by default gets `@`, `@home`, `@log`, `@pkg`,
@@ -257,6 +350,20 @@ ends ask for the timezone first.
 GRUB (UEFI or BIOS; os-prober enabled when installing alongside other
 systems), systemd-boot (UEFI), or Limine (UEFI). systemd-boot and Limine do
 not detect Windows on a separate ESP, so the UI recommends GRUB for dual boot.
+
+Boot artwork (`boot_art.py`, a placeholder LED paw print until the protogen
+visor art is final):
+
+- **Plymouth** (desktop personas): the `protogenos` two-step theme, a paw
+  with a scanning glow, themed passphrase prompt; `plymouth` goes into the
+  initramfs right after `systemd`/`udev` (before any encrypt hook) and the
+  kernel command line gets `quiet splash`. Server and Minimal show boot
+  messages instead. The live ISO uses the same theme.
+- **GRUB** (unless the serial console is on): `GRUB_THEME` points at
+  `/usr/share/grub/themes/protogenos/` (dark background with the paw, red
+  selection).
+- **Limine**: `interface_branding: protogenOS` in red.
+- **syslinux** (ISO, BIOS): the paw background.
 
 ## Users and services
 
